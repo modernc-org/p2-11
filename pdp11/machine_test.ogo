@@ -1,0 +1,346 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+import "testing"
+
+// The machine with devices on its bus, and what the console does to it. What
+// the instructions do is the business of the vectors.
+
+// A bell is a device of one register that requests an interrupt when it is
+// rung.
+type bell struct {
+	vector  uint16
+	reg     uint16
+	ringing bool
+	granted int
+	resets  int
+}
+
+func (b *bell) Reset() {
+	b.ringing = false
+	b.resets++
+}
+
+func (b *bell) Read(a uint16) uint16 {
+	return b.reg
+}
+
+func (b *bell) Write(a, v, mask uint16) {
+	b.reg = b.reg&^mask | v&mask
+}
+
+func (b *bell) Request() uint16 {
+	if b.ringing {
+		return b.vector
+	}
+	return 0
+}
+
+func (b *bell) Granted(vector uint16) {
+	b.ringing = false
+	b.granted++
+}
+
+var (
+	tm   Machine
+	low  bell // at 164000, priority 4, vector 300
+	high bell // at 164002, priority 6, vector 310
+
+	bells   [maxDevices]bell
+	crowded Machine
+)
+
+const (
+	lowAt  = 0o164000
+	highAt = 0o164002
+)
+
+// fresh brings tm to the state every test here starts from: the two bells on
+// the bus, their vectors leading to 2000 and 3000 at priority 7, the stack at
+// 1000, and program at 1000 with the program counter on it.
+func fresh(program []uint16) {
+	if tm.ndevices == 0 {
+		tm.Attach(&low, lowAt, 2, 4)
+		tm.Attach(&high, highAt, 2, 6)
+	}
+	low = bell{vector: 0o300}
+	high = bell{vector: 0o310}
+	tm.Reset()
+	for a := uint16(0); a < 0o4000; a += 2 {
+		tm.Deposit(a, 0)
+	}
+	tm.Deposit(0o300, 0o2000)
+	tm.Deposit(0o302, 0o340)
+	tm.Deposit(0o310, 0o3000)
+	tm.Deposit(0o312, 0o340)
+	tm.Load(0o1000, program)
+	tm.R[6] = 0o1000
+	tm.R[7] = 0o1000
+}
+
+// expect fails the test unless got is want.
+func expect(t *testing.T, what string, got, want uint16) {
+	if got != want {
+		printf("%s %06o, want %06o\n", what, got, want)
+		t.Fail()
+	}
+}
+
+func TestAttach(t *testing.T) {
+	// The ogo of 2026-09-23 does not make an interface of an element's
+	// address where it is an argument, which the one of 2026-09-26 does. Until
+	// that is the one to be had, the address goes through a variable.
+	first, other := &bells[0], &bells[1]
+
+	var ok bool
+	ok = crowded.Attach(first, 0o160000, 2, 4)
+	ok = ok && !crowded.Attach(other, 0o157776, 2, 4) // below the I/O page
+	ok = ok && !crowded.Attach(other, 0o160011, 2, 4) // odd
+	ok = ok && !crowded.Attach(other, 0o160010, 3, 4) // an odd size
+	ok = ok && !crowded.Attach(other, 0o160010, 0, 4) // no size
+	ok = ok && !crowded.Attach(other, 0o177776, 4, 4) // past the end
+	ok = ok && !crowded.Attach(other, 0o177774, 4, 4) // over the status word
+	ok = ok && !crowded.Attach(other, 0o177570, 2, 4) // over the switch register
+	ok = ok && !crowded.Attach(other, 0o160000, 2, 4) // over the first
+	ok = ok && !crowded.Attach(other, 0o160010, 2, 3) // no such priority
+	ok = ok && !crowded.Attach(other, 0o160010, 2, 8)
+	for i := 1; i < maxDevices; i++ {
+		b := &bells[i]
+		ok = ok && crowded.Attach(b, 0o160000+uint16(8*i), 4, uint16(4+i&3))
+	}
+	ok = ok && !crowded.Attach(first, 0o170000, 2, 4) // the bus is full
+	if !ok {
+		println("Attach took what it should refuse, or refused what it should take")
+		t.Fail()
+	}
+
+	// They are asked in the order of their priorities.
+	for i := 1; i < crowded.ndevices; i++ {
+		if crowded.devices[i-1].priority < crowded.devices[i].priority {
+			println("slot", i, "has a higher priority than the one before it")
+			t.Fail()
+		}
+	}
+}
+
+func TestConsole(t *testing.T) {
+	fresh(nil)
+	v, ok := tm.Examine(0o1000)
+	if !ok || v != 0 {
+		println("Examine of memory:", v, ok)
+		t.Fail()
+	}
+	if !tm.Deposit(0o157776, 0o123456) {
+		println("Deposit refused the last word of memory")
+		t.Fail()
+	}
+	v, _ = tm.Examine(0o157776)
+	expect(t, "the last word of memory", v, 0o123456)
+	tm.Deposit(0o157776, 0)
+
+	_, ok = tm.Examine(0o1001)
+	if ok {
+		println("Examine took an odd address")
+		t.Fail()
+	}
+	_, ok = tm.Examine(0o160000)
+	if ok {
+		println("Examine found something at 160000")
+		t.Fail()
+	}
+	if tm.Deposit(0o160000, 1) {
+		println("Deposit found something at 160000")
+		t.Fail()
+	}
+
+	// A device's register, and the two of the processor.
+	tm.Deposit(lowAt, 0o4321)
+	expect(t, "the bell's register", low.reg, 0o4321)
+	v, _ = tm.Examine(lowAt)
+	expect(t, "the bell's register, examined", v, 0o4321)
+	tm.Switches = 0o173030
+	v, _ = tm.Examine(SwitchRegister)
+	expect(t, "the switch register", v, 0o173030)
+	tm.Deposit(SwitchRegister, 0o52525)
+	expect(t, "the display register", tm.Display, 0o52525)
+	tm.SetPSW(0o357)
+	v, _ = tm.Examine(StatusWord)
+	expect(t, "the status word", v, 0o357)
+
+	// None of which has left a trap behind.
+	tm.SetPSW(0)
+	tm.Load(0o1000, []uint16{0o000240}) // NOP
+	tm.Step()
+	tm.Step()
+	expect(t, "PC", tm.R[7], 0o1004)
+}
+
+func TestDeviceRegister(t *testing.T) {
+	fresh([]uint16{
+		0o012737, 0o123456, lowAt,     // MOV #123456, @#low
+		0o112737, 0o000377, lowAt,     // MOVB #377, @#low
+		0o112737, 0o000001, lowAt + 1, // MOVB #1, @#low+1
+		0o013700, lowAt,               // MOV @#low, R0
+		0o113701, lowAt + 1,           // MOVB @#low+1, R1
+		0o005237, highAt,              // INC @#high
+		0o000000,                      // HALT
+	})
+	tm.Step()
+	expect(t, "a word written", low.reg, 0o123456)
+	tm.Step()
+	expect(t, "the lower byte written", low.reg, 0o123777)
+	tm.Step()
+	expect(t, "the upper byte written", low.reg, 0o000777)
+	tm.Step()
+	expect(t, "a word read", tm.R[0], 0o000777)
+	tm.Step()
+	expect(t, "a byte read", tm.R[1], 0o000001)
+	tm.Step()
+	expect(t, "a word incremented", high.reg, 1)
+	if s := tm.Step(); s != Halted {
+		println("the state after HALT:", int(s))
+		t.Fail()
+	}
+	expect(t, "PC", tm.R[7], 0o1040)
+	if tm.Count != 7 {
+		println("instructions counted:", tm.Count)
+		t.Fail()
+	}
+}
+
+func TestInterrupt(t *testing.T) {
+	fresh([]uint16{0o000777})    // BR .
+	tm.Deposit(0o2000, 0o000002) // RTI
+	tm.SetPSW(0o005)
+	tm.Run(100)
+	expect(t, "PC, nothing having rung", tm.R[7], 0o1000)
+
+	low.ringing = true
+	tm.Run(100)
+	expect(t, "PC after the return", tm.R[7], 0o1000)
+	expect(t, "the status word after the return", tm.PSW(), 0o005)
+	expect(t, "SP after the return", tm.R[6], 0o1000)
+	v, _ := tm.Examine(0o776)
+	expect(t, "the status word that was pushed", v, 0o005)
+	v, _ = tm.Examine(0o774)
+	expect(t, "the program counter that was pushed", v, 0o1000)
+	if low.granted != 1 || low.ringing {
+		println("the bell was granted", low.granted, "times")
+		t.Fail()
+	}
+
+	// A processor at the priority of the request does not take it, one below
+	// it does, and it does as soon as it is.
+	fresh([]uint16{
+		0o000240,                     // NOP
+		0o012737, 0o000140, 0o177776, // MOV #140, @#PSW
+		0o000240,                     // NOP, which the interrupt comes before
+		0o000777,                     // BR .
+	})
+	tm.SetPSW(0o200)
+	low.ringing = true
+	tm.Step()
+	expect(t, "PC at priority 4", tm.R[7], 0o1002)
+	tm.Step()
+	expect(t, "PC having come down to 3", tm.R[7], 0o1010)
+	tm.Step()
+	expect(t, "PC in the interrupt", tm.R[7], 0o2002)
+	expect(t, "the status word in the interrupt", tm.PSW(), 0o340)
+	v, _ = tm.Examine(0o774)
+	expect(t, "where the interrupt returns to", v, 0o1010)
+}
+
+func TestInterruptOrder(t *testing.T) {
+	fresh([]uint16{0o000777})    // BR .
+	tm.Deposit(0o302, 0o200)     // the low bell's interrupt runs at its priority
+	tm.Deposit(0o2000, 0o000777) // and stays: BR .
+	tm.Deposit(0o3000, 0o000240) // the high bell's is NOP
+	tm.Deposit(0o3002, 0o000002) // and RTI
+	low.ringing = true
+	high.ringing = true
+	tm.Step()
+	expect(t, "PC, both having rung", tm.R[7], 0o3002)
+	if high.granted != 1 || low.granted != 0 {
+		println("granted: the high bell", high.granted, "the low bell", low.granted)
+		t.Fail()
+	}
+	tm.Step()
+	expect(t, "PC, the high one served", tm.R[7], 0o1000)
+	tm.Step()
+	expect(t, "PC, the low one's turn", tm.R[7], 0o2000)
+	if low.granted != 1 {
+		println("the low bell was granted", low.granted, "times")
+		t.Fail()
+	}
+
+	// And the high one interrupts the low one's.
+	high.ringing = true
+	tm.Step()
+	expect(t, "PC, the high one having rung again", tm.R[7], 0o3002)
+	expect(t, "SP, two interrupts deep", tm.R[6], 0o770)
+	tm.Step()
+	expect(t, "PC, back in the low one's", tm.R[7], 0o2000)
+	expect(t, "the status word there", tm.PSW(), 0o200)
+}
+
+func TestWait(t *testing.T) {
+	fresh([]uint16{
+		0o000001, // WAIT
+		0o000000, // HALT
+	})
+	tm.Deposit(0o2000, 0o000002) // RTI
+	for i := 0; i < 3; i++ {
+		if s := tm.Run(100); s != Waiting {
+			println("the state of a machine that waits:", int(s))
+			t.Fail()
+		}
+	}
+	expect(t, "PC while waiting", tm.R[7], 0o1002)
+	if tm.Count != 1 {
+		println("instructions counted while waiting:", tm.Count)
+		t.Fail()
+	}
+
+	low.ringing = true
+	if s := tm.Run(100); s != Halted {
+		println("the state after the interrupt:", int(s))
+		t.Fail()
+	}
+	expect(t, "PC after the interrupt", tm.R[7], 0o1004)
+	if tm.Count != 3 {
+		println("instructions counted:", tm.Count)
+		t.Fail()
+	}
+}
+
+func TestReset(t *testing.T) {
+	fresh([]uint16{0o000005}) // RESET
+	was := low.resets
+	low.reg = 0o1234
+	tm.R[3] = 0o4321
+	tm.Step()
+	if low.resets != was+1 {
+		println("RESET reset the bell", low.resets-was, "times")
+		t.Fail()
+	}
+	expect(t, "R3 after RESET", tm.R[3], 0o4321)
+
+	tm.SetPSW(0o140000) // and in user mode it does nothing
+	tm.R[7] = 0o1000
+	tm.Step()
+	if low.resets != was+1 {
+		println("RESET in user mode reset the bell")
+		t.Fail()
+	}
+}
+
+func TestFault(t *testing.T) {
+	fresh([]uint16{0o104000}) // EMT
+	tm.R[6] = 0o170000        // and nowhere to push to
+	tm.Step()
+	if s := tm.Step(); s != Faulted {
+		println("the state with no stack for a trap:", int(s))
+		t.Fail()
+	}
+}

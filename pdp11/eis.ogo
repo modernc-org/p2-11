@@ -1,0 +1,174 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// The extended instruction set, KE11-E: MUL, DIV, ASH and ASHC.
+//
+// Each has a register and a word operand. Where 32 bits are wanted they are
+// the register and the one after it, the upper half in the first; an odd
+// register is its own successor, and the half written last is what it keeps.
+
+// value fetches the operand of an extended instruction.
+func (m *Machine) value(ir uint16) uint16 {
+	s := ir & 0o77
+	if s < 8 {
+		return m.R[s]
+	}
+	a := m.address(s, 2)
+	if m.traps&aborts != 0 {
+		return 0
+	}
+	return m.read(a, 2)
+}
+
+// pair answers the 32 bits in register r and its successor.
+func (m *Machine) pair(r uint16) int32 {
+	return int32(uint32(m.R[r])<<16 | uint32(m.R[r|1]))
+}
+
+// setPair stores v in register r and its successor and answers its N and Z.
+func (m *Machine) setPair(r uint16, v int32) uint16 {
+	m.R[r] = uint16(uint32(v) >> 16)
+	m.R[r|1] = uint16(v)
+	switch {
+	case v == 0:
+		return flagZ
+	case v < 0:
+		return flagN
+	}
+	return 0
+}
+
+func (m *Machine) mul(ir uint16) {
+	v := m.value(ir)
+	if m.traps&aborts != 0 {
+		return
+	}
+	r := ir >> 6 & 7
+	p := int32(int16(m.R[r])) * int32(int16(v))
+	cc := m.setPair(r, p)
+	if p < -0x8000 || p > 0x7fff {
+		cc |= flagC // the product does not fit one register
+	}
+	m.psw = m.psw&^flags | cc
+}
+
+func (m *Machine) div(ir uint16) {
+	v := m.value(ir)
+	if m.traps&aborts != 0 {
+		return
+	}
+	r := ir >> 6 & 7
+	n := m.pair(r)
+	d := int32(int16(v))
+	switch {
+	case d == 0:
+		m.psw = m.psw&^flags | flagZ | flagV | flagC
+		return
+	case n == -0x80000000 && d == -1:
+		m.psw = m.psw&^flags | flagV
+		return
+	}
+
+	q := n / d
+	var cc uint16
+	if q < 0 {
+		cc = flagN
+	}
+	if q < -0x8000 || q > 0x7fff {
+		m.psw = m.psw&^flags | cc | flagV // the quotient does not fit
+		return
+	}
+	if q == 0 {
+		cc |= flagZ
+	}
+	m.R[r] = uint16(q)
+	m.R[r|1] = uint16(n - d*q)
+	m.psw = m.psw&^flags | cc
+}
+
+// ash shifts a register by the count in the low six bits of the operand: to
+// the left if it is positive, arithmetically to the right if it is negative.
+func (m *Machine) ash(ir uint16) {
+	v := m.value(ir)
+	if m.traps&aborts != 0 {
+		return
+	}
+	r := ir >> 6 & 7
+	x := int32(int16(m.R[r]))
+	y := x
+	var cc uint16
+	n := v & 0o77
+	switch {
+	case n == 0:
+	case n < 16: // left, and part of the register stays
+		y = x << n
+		out := uint16(x >> (16 - n)) // what left, under the sign it had
+		want := uint16(0)
+		if y&0x8000 != 0 {
+			want = 0xffff
+		}
+		if out != want {
+			cc = flagV // the sign changed on the way
+		}
+		cc |= out & flagC
+	case n < 32: // left, and none of it does
+		y = 0
+		if x != 0 {
+			cc = flagV
+		}
+		if n == 16 {
+			cc |= uint16(x) & flagC
+		}
+	case n == 32: // right by 32
+		y = x >> 31
+		cc = uint16(y) & flagC
+	default: // right by 1 to 31
+		n = 64 - n
+		y = x >> n
+		cc = uint16(x>>(n-1)) & flagC
+	}
+	m.R[r] = uint16(y)
+	switch {
+	case uint16(y) == 0:
+		cc |= flagZ
+	case y&0x8000 != 0:
+		cc |= flagN
+	}
+	m.psw = m.psw&^flags | cc
+}
+
+// ashc shifts the 32 bits in a register and its successor as ash shifts 16.
+func (m *Machine) ashc(ir uint16) {
+	v := m.value(ir)
+	if m.traps&aborts != 0 {
+		return
+	}
+	r := ir >> 6 & 7
+	x := m.pair(r)
+	y := x
+	var cc uint16
+	n := v & 0o77
+	switch {
+	case n == 0:
+	case n < 32: // left
+		y = int32(uint32(x) << n)
+		out := x >> (32 - n) // what left, under the sign it had
+		want := int32(0)
+		if y < 0 {
+			want = -1
+		}
+		if out != want {
+			cc = flagV
+		}
+		cc |= uint16(out) & flagC
+	case n == 32: // right by 32
+		y = x >> 31
+		cc = uint16(y) & flagC
+	default: // right by 1 to 31
+		n = 64 - n
+		y = x >> n
+		cc = uint16(x>>(n-1)) & flagC
+	}
+	m.psw = m.psw&^flags | cc | m.setPair(r, y)
+}

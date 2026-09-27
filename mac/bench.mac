@@ -1,0 +1,27 @@
+; Copyright 2026 The p2-11 Authors. All rights reserved.
+; Use of this source code is governed by a BSD-style
+; license that can be found in the LICENSE file.
+
+	.title	bench
+
+; A loop to time the machine by. It adds to a hundred words of memory a
+; thousand times over and halts, which is 303,004 instructions: three before
+; the loops, three hundred and three a pass, and the halt.
+
+	.asect
+	.=1000
+
+start:	mov	#start, sp
+	clr	r3
+	mov	#1000., r5
+1$:	mov	#table, r1
+	mov	#100., r2
+2$:	add	r2, (r1)+
+	inc	r3
+	sob	r2, 2$
+	sob	r5, 1$
+	halt
+
+table:	.blkw	100.
+
+	.end	start

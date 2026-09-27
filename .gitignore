@@ -4,6 +4,9 @@ tmp/
 *.binary
 *.p2asm
 
+# What scripts/tools.sh fetches and builds: SimH and the macro11 assembler.
+/tools/
+
 # Guest software never enters the repository, whatever its license; see
 # CLAUDE.md. guest/ is the place to keep it, and the patterns are a second net
 # for an image or a kit dropped anywhere else. They match either case, since a

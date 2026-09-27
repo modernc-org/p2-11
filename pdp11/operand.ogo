@@ -1,0 +1,55 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Operands. An operand specifier is six bits of an instruction, a mode in the
+// upper three and a register in the lower. In mode 0 the operand is the
+// register, which the instructions deal with where they stand; in the other
+// seven it is in memory, at the address that address answers.
+
+// address decodes an operand specifier whose mode is not 0: it does to the
+// register what the mode does and answers where the operand is. size is 1
+// for the operand of a byte instruction and 2 otherwise.
+func (m *Machine) address(spec, size uint16) uint16 {
+	r := spec & 7
+	if r >= 6 {
+		size = 2 // the stack pointer and the program counter stay even
+	}
+	switch spec >> 3 {
+	case 1: // (R): the register holds the address
+		return m.R[r]
+	case 2: // (R)+: and steps past the operand afterwards
+		a := m.R[r]
+		m.R[r] = a + size
+		return a
+	case 3: // @(R)+: the register holds the address of the address
+		a := m.R[r]
+		m.R[r] = a + 2
+		return m.read(a, 2)
+	case 4: // -(R): the register steps back first
+		a := m.R[r] - size
+		m.R[r] = a
+		if r == 6 && a < stackLimit {
+			m.stackCheck(a)
+		}
+		return a
+	case 5: // @-(R)
+		a := m.R[r] - 2
+		m.R[r] = a
+		if r == 6 && a < stackLimit {
+			m.stackCheck(a)
+		}
+		return m.read(a, 2)
+	}
+
+	// X(R) and @X(R): the word after the instruction is added to the register.
+	x := m.read(m.R[7], 2)
+	if m.traps&aborts != 0 {
+		return 0
+	}
+	m.R[7] += 2
+	if spec>>3 == 6 {
+		return m.R[r] + x
+	}
+	return m.read(m.R[r]+x, 2)
+}

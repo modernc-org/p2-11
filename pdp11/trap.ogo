@@ -1,0 +1,150 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Traps and interrupts.
+
+// The traps, the most urgent first. An instruction requests one by setting its
+// bit, and the most urgent of those requested is taken before the next
+// instruction is.
+const (
+	trapOdd = 1 << iota // a word at an odd address
+	trapTimeout         // an address nothing answers at
+	trapJump            // a jump to a register
+	trapReserved        // an instruction this processor does not have
+	trapBPT             // the BPT instruction
+	trapIOT             // the IOT instruction
+	trapEMT             // the EMT instructions
+	trapTRAP            // the TRAP instructions
+	trapTrace           // an instruction executed with the trace bit set
+	trapStack           // the kernel's stack pointer below the limit
+
+	trapCount = iota
+
+	// aborts is the traps that end the instruction that requests them.
+	aborts = trapOdd | trapTimeout
+
+	// attention is no trap. It is requested with the traps because what it
+	// asks for is what they ask for, which is that the instructions stop
+	// following one another for a moment: here to ask the devices about
+	// interrupts, and to see whether the machine still runs.
+	attention = 1 << 15
+)
+
+// trapVector is where each trap's new program counter and status word are.
+var trapVector = [trapCount]uint16{0o004, 0o004, 0o004, 0o010, 0o014, 0o020, 0o030, 0o034, 0o014, 0o004}
+
+// trapClears is what taking each trap withdraws besides the trap itself. An
+// access that failed ends the instruction, so what the instruction would have
+// ended in goes with it; and the instructions that trap are not traced.
+var trapClears = [trapCount]uint16{
+	trapOdd | trapTimeout | trapStack | trapTrace,
+	trapTimeout | trapStack | trapTrace,
+	trapJump | trapTrace,
+	trapReserved | trapTrace,
+	trapBPT | trapTrace,
+	trapIOT | trapTrace,
+	trapEMT | trapTrace,
+	trapTRAP | trapTrace,
+	trapTrace,
+	trapStack,
+}
+
+// due takes the traps that are requested and the interrupt that is due, and
+// reports false if one of them could not be taken.
+func (m *Machine) due() bool {
+	for m.traps&^attention != 0 {
+		if !m.trap() {
+			return false
+		}
+	}
+	if !m.interrupt() {
+		return false
+	}
+	for m.traps&^attention != 0 { // its pushes may have run into the stack limit
+		if !m.trap() {
+			return false
+		}
+	}
+	m.traps = 0
+	return true
+}
+
+// enter takes a trap or an interrupt through the vector at v: the status word
+// and the program counter go on the stack of the mode the vector names, and
+// new ones come from the vector. It reports false when the vector could not be
+// read or the stack not written, which stops a real processor as well.
+func (m *Machine) enter(v uint16) bool {
+	pc := m.read(v, 2)
+	psw := m.read(v+2, 2) & statusBits
+	if m.traps&aborts != 0 {
+		return false
+	}
+
+	old := m.psw
+	now, next := old>>14, psw>>14
+	m.sp[now] = m.R[6]
+	sp := m.sp[next]
+	m.write(sp-2, 2, old)
+	m.write(sp-4, 2, m.R[7])
+	if m.traps&aborts != 0 {
+		return false
+	}
+
+	m.psw = psw&^previousMode | now<<12
+	m.R[6] = sp - 4
+	m.R[7] = pc
+	m.waiting = false
+	return true
+}
+
+// trap takes the most urgent of the traps requested and reports what enter
+// does.
+func (m *Machine) trap() bool {
+	bit := uint16(1)
+	for i := 0; i < trapCount; i++ {
+		if m.traps&bit != 0 {
+			m.traps &^= trapClears[i]
+			if !m.enter(trapVector[i]) {
+				return false
+			}
+			if bit != trapStack {
+				m.stackCheck(m.R[6])
+			}
+			return true
+		}
+		bit <<= 1
+	}
+	m.traps = 0
+	return true
+}
+
+// interrupt asks the devices, from the highest priority down, whether one
+// requests an interrupt the processor's priority admits, and takes the first.
+// It reports what enter does, and true if there was nothing to take.
+func (m *Machine) interrupt() bool {
+	level := (m.psw & priorityBits) >> 5
+	for i := 0; i < m.ndevices; i++ {
+		s := &m.devices[i]
+		if s.priority <= level {
+			break
+		}
+		if v := s.dev.Request(); v != 0 {
+			s.dev.Granted(v)
+			if !m.enter(v) {
+				return false
+			}
+			m.stackCheck(m.R[6])
+			break
+		}
+	}
+	return true
+}
+
+// stackCheck requests the stack trap if sp, which the kernel has just pushed
+// down to, is below the limit.
+func (m *Machine) stackCheck(sp uint16) {
+	if sp < stackLimit && m.psw&currentMode == kernel {
+		m.traps |= trapStack
+	}
+}

@@ -1,0 +1,101 @@
+; Copyright 2026 The p2-11 Authors. All rights reserved.
+; Use of this source code is governed by a BSD-style
+; license that can be found in the LICENSE file.
+
+	.title	demo
+
+; The first program the machine ran. It says what it is on the console, finds
+; out how much memory there is by reading upwards until nothing answers, says
+; that in decimal, and then echoes what is typed, the receiver interrupting,
+; until a control-D halts it.
+
+	.asect
+	.=1000
+
+	rcsr	= 177560		; the console: receiver status,
+	rbuf	= 177562		; receiver buffer,
+	xcsr	= 177564		; transmitter status,
+	xbuf	= 177566		; and transmitter buffer
+	psw	= 177776
+
+start:	mov	#start, sp
+	mov	#hello, r1
+	jsr	pc, puts
+
+; Memory ends where a read times out, which traps through 4 with the register
+; one word past the address that did it.
+	mov	#found, @#4
+	mov	#340, @#6
+	clr	r2
+1$:	tst	(r2)+
+	br	1$
+found:	mov	#start, sp		; what the trap pushed is of no interest
+	sub	#2, r2
+	clc
+	ror	r2			; bytes to words, as an unsigned number
+	ash	#-10., r2		; and words to K
+	mov	r2, r3
+	jsr	pc, number
+	mov	#words, r1
+	jsr	pc, puts
+
+; From here on the receiver interrupts and the program waits.
+	mov	#typed, @#60
+	mov	#200, @#62		; at priority 4, the receiver's own
+	mov	#100, @#rcsr
+	clr	@#psw
+2$:	wait
+	br	2$
+
+typed:	mov	r0, -(sp)
+	movb	@#rbuf, r0
+	bic	#177600, r0
+	cmpb	r0, #4			; control-D
+	beq	4$
+	jsr	pc, putc
+	cmpb	r0, #15			; a return is echoed with a line feed
+	bne	3$
+	mov	#12, r0
+	jsr	pc, putc
+3$:	mov	(sp)+, r0
+	rti
+4$:	mov	#bye, r1
+	jsr	pc, puts
+5$:	tstb	@#xcsr			; let the last character leave
+	bpl	5$
+	halt
+
+; putc writes the character in r0, waiting for the transmitter first.
+putc:	tstb	@#xcsr
+	bpl	putc
+	movb	r0, @#xbuf
+	rts	pc
+
+; puts writes the characters r1 points at, up to a zero.
+puts:	movb	(r1)+, r0
+	beq	1$
+	jsr	pc, putc
+	br	puts
+1$:	rts	pc
+
+; number writes r3 in decimal, the most significant digit first: each call
+; divides by ten, keeps the remainder on the stack and calls itself for what is
+; left.
+number:	clr	r0
+	mov	r3, r1
+	div	#10., r0
+	mov	r1, -(sp)
+	mov	r0, r3
+	beq	1$
+	jsr	pc, number
+1$:	mov	(sp)+, r0
+	add	#'0, r0
+	jsr	pc, putc
+	rts	pc
+
+hello:	.asciz	<15><12>"PDP-11/40 on a Propeller 2, in OctoGo"<15><12>
+words:	.asciz	"K words of memory"<15><12>"Type; control-D halts."<15><12>
+bye:	.asciz	<15><12>"Halted."<15><12>
+	.even
+
+	.end	start

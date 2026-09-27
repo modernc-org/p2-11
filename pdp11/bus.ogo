@@ -1,0 +1,141 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// The bus: memory below the I/O page, and in the I/O page the registers of the
+// processor and of the devices.
+//
+// An access that cannot be made does not stop the instruction where it stands,
+// there being nothing in the language to unwind with. It requests a trap and
+// reads as zero, and the instruction asks whether one of the aborts is
+// requested before it changes anything, which is what leaves the machine as a
+// real one is left.
+//
+// Reading and writing memory is most of what the machine does, and a call
+// costs more here than what these functions do. So each is one function with
+// memory first, and what is rare is what it calls.
+
+// read reads what is at the address a: a word, or a byte if size is 1.
+func (m *Machine) read(a, size uint16) uint16 {
+	i := a >> 1
+	if i >= MemWords {
+		return m.readIO(a, size)
+	}
+	if size == 1 {
+		if a&1 != 0 {
+			return m.mem[i] >> 8
+		}
+		return m.mem[i] & 0xff
+	}
+	if a&1 != 0 {
+		m.traps |= trapOdd
+		return 0
+	}
+	return m.mem[i]
+}
+
+// write writes v at the address a: a word, or a byte if size is 1, and then
+// nothing beside the byte.
+func (m *Machine) write(a, size, v uint16) {
+	i := a >> 1
+	if i >= MemWords {
+		m.writeIO(a, size, v)
+		return
+	}
+	if size == 1 {
+		if a&1 != 0 {
+			m.mem[i] = m.mem[i]&0x00ff | v<<8
+			return
+		}
+		m.mem[i] = m.mem[i]&0xff00 | v&0xff
+		return
+	}
+	if a&1 != 0 {
+		m.traps |= trapOdd
+		return
+	}
+	m.mem[i] = v
+}
+
+// device answers the device that has the register at a, or nil after
+// requesting the trap a bus time-out ends in.
+func (m *Machine) device(a uint16) Device {
+	if a >= IOPage {
+		if i := m.owner[(a-IOPage)>>1]; i != 0 {
+			m.traps |= attention // what it asks for may be about to change
+			return m.devices[i-1].dev
+		}
+	}
+	m.traps |= trapTimeout
+	return nil
+}
+
+// readIO reads what is not memory. Either byte of a register is read by
+// reading the register.
+func (m *Machine) readIO(a, size uint16) uint16 {
+	if size == 2 && a&1 != 0 {
+		m.traps |= trapOdd
+		return 0
+	}
+	var w uint16
+	switch a &^ 1 {
+	case StatusWord:
+		w = m.psw
+	case SwitchRegister:
+		w = m.Switches
+	default:
+		d := m.device(a)
+		if d == nil {
+			return 0
+		}
+		w = d.Read(a &^ 1)
+	}
+	switch {
+	case size == 2:
+		return w
+	case a&1 != 0:
+		return w >> 8
+	}
+	return w & 0xff
+}
+
+// writeIO writes what is not memory. A register is told which of its bits are
+// written, all of them for a word and one half of them for a byte.
+func (m *Machine) writeIO(a, size, v uint16) {
+	mask := uint16(0xffff)
+	if size == 1 {
+		mask = 0x00ff
+		v &= 0xff
+		if a&1 != 0 {
+			mask = 0xff00
+			v <<= 8
+		}
+	} else if a&1 != 0 {
+		m.traps |= trapOdd
+		return
+	}
+	switch a &^ 1 {
+	case StatusWord:
+		// A program changes everything in the status word but the trace bit,
+		// which only a trap and a return from one change.
+		m.setPSW((m.psw&^mask|v&mask)&^flagT | m.psw&flagT)
+	case SwitchRegister:
+		m.Display = m.Display&^mask | v&mask
+	default:
+		if d := m.device(a); d != nil {
+			d.Write(a&^1, v, mask)
+		}
+	}
+}
+
+// setPSW makes v the status word. A change of mode changes the stack pointer:
+// each mode has its own.
+func (m *Machine) setPSW(v uint16) {
+	v &= statusBits
+	if now, next := m.psw>>14, v>>14; now != next {
+		m.sp[now] = m.R[6]
+		m.R[6] = m.sp[next]
+	}
+	m.psw = v
+	m.traps |= attention // the priority may have come down to below a request
+}

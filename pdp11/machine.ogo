@@ -1,0 +1,232 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package pdp11 is a PDP-11/40: the KD11-A processor with the KE11-E extended
+// instruction set, its memory, and the bus its devices sit on.
+//
+// A Machine is stepped by one cog. Devices are attached before it runs; each
+// answers for a block of addresses in the I/O page and may ask for interrupts.
+// What a device does on other cogs is its own business: the machine talks to it
+// through the Device interface only, and only from the cog that steps the
+// machine.
+//
+// Nothing here knows about the Propeller 2, so the package compiles as Go once
+// it is given a package clause.
+
+const (
+	// MemWords is the size of memory in words: 28K, which is all there is below
+	// the I/O page while addresses are 16 bits wide.
+	MemWords = 28 * 1024
+
+	// IOPage is the first address of the I/O page, the top 8 KB of the address
+	// space, where the registers of the devices and of the processor itself
+	// are.
+	IOPage = 0o160000
+
+	// StatusWord and SwitchRegister are the addresses of the two registers of
+	// the processor in the I/O page.
+	StatusWord     = 0o177776
+	SwitchRegister = 0o177570
+
+	maxDevices = 8
+	ioWords    = (0o200000 - IOPage) / 2
+
+	// pollEvery is how many instructions run between two rounds of asking the
+	// devices whether they want an interrupt. A round is also made as soon as
+	// the program has touched a device or the status word, which is when the
+	// answer is most likely to have changed.
+	pollEvery = 32
+
+	// stackLimit is where the 11/40's fixed stack limit is: a push that leaves
+	// the kernel's stack pointer below it traps once the instruction is over.
+	stackLimit = 0o400
+)
+
+// The bits of the processor status word.
+const (
+	flagC = 1 << iota // carry
+	flagV             // overflow
+	flagZ             // zero
+	flagN             // negative
+	flagT             // trace: trap after every instruction
+
+	flags        = flagN | flagZ | flagV | flagC
+	priorityBits = 0o000340
+	previousMode = 0o030000
+	currentMode  = 0o140000
+	statusBits   = currentMode | previousMode | priorityBits | flagT | flags
+
+	kernel = 0
+)
+
+// A State is what a Machine is doing after a step.
+type State int
+
+const (
+	Running State = iota // the next instruction is due
+	Waiting              // a WAIT instruction is waiting for an interrupt
+	Halted               // a HALT instruction was executed
+	Faulted              // a trap could not be taken: no vector, or no stack
+)
+
+// A Device is a peripheral on the bus. It answers for the addresses it was
+// attached at, and its methods are called by the cog stepping the machine.
+type Device interface {
+	// Reset puts the device in the state power-up leaves it in. The RESET
+	// instruction does that to every device.
+	Reset()
+
+	// Read reads the register at the even address a.
+	Read(a uint16) uint16
+
+	// Write writes the register at the even address a, the bits of it that
+	// mask selects: all of them when a program writes a word, and one half of
+	// them when it writes a byte.
+	Write(a, v, mask uint16)
+
+	// Request answers the vector of the interrupt the device is asking for,
+	// or 0 if it asks for none.
+	Request() uint16
+
+	// Granted tells the device the processor has taken its interrupt through
+	// vector, which withdraws the request.
+	Granted(vector uint16)
+}
+
+// A slot is one device's place on the bus.
+type slot struct {
+	dev      Device
+	base     uint16 // the address of its first register
+	size     uint16 // how many bytes of the I/O page are its own
+	priority uint16 // the level it requests the bus at, 4 to 7
+}
+
+// A Machine is a processor with its memory and its bus. The zero Machine has
+// no devices and is ready to be Reset. It is large and must not be copied.
+type Machine struct {
+	// R holds the general registers. R[6] is the stack pointer of the mode the
+	// processor is in and R[7] the program counter.
+	R [8]uint16
+
+	// Switches is what a program reads from the switch register, and Display
+	// what it last wrote there.
+	Switches uint16
+	Display  uint16
+
+	// Count is how many instructions have been executed since Reset.
+	Count uint32
+
+	psw     uint16
+	sp      [4]uint16 // the stack pointers, by mode; R[6] is the current one's
+	traps   uint16    // the traps requested and not yet taken, and attention
+	waiting bool      // a WAIT is waiting for an interrupt
+	halted  bool      // a HALT was executed
+
+	devices  [maxDevices]slot
+	ndevices int
+	owner    [ioWords]uint8 // per word of the I/O page: its device's slot plus one
+
+	mem [MemWords]uint16
+}
+
+// Reset does what the START switch does: it resets the devices and clears the
+// registers, the status word and whatever was pending. Memory is left alone,
+// as core memory is.
+func (m *Machine) Reset() {
+	clear(m.R[:])
+	clear(m.sp[:])
+	m.psw = 0
+	m.traps = attention
+	m.waiting = false
+	m.halted = false
+	m.Count = 0
+	m.resetDevices()
+}
+
+func (m *Machine) resetDevices() {
+	for i := 0; i < m.ndevices; i++ {
+		m.devices[i].dev.Reset()
+	}
+}
+
+// Attach puts d on the bus at the size bytes from the address base, requesting
+// interrupts at priority. It reports whether there was room: base and size must
+// be even and inside the I/O page, clear of the processor's own registers and of
+// every device attached before, and priority must be a bus request level, 4 to
+// 7. Devices of one priority are served in the order they were attached.
+func (m *Machine) Attach(d Device, base, size, priority uint16) bool {
+	if m.ndevices == maxDevices || base < IOPage || base&1 != 0 || size == 0 || size&1 != 0 {
+		return false
+	}
+	if uint32(size) > 0o200000-uint32(base) || priority < 4 || priority > 7 {
+		return false
+	}
+	for a := uint32(base); a < uint32(base)+uint32(size); a += 2 {
+		if a == StatusWord || a == SwitchRegister || m.owner[(a-IOPage)/2] != 0 {
+			return false
+		}
+	}
+
+	// The slots are kept in the order interrupts are granted in.
+	at := m.ndevices
+	for at > 0 && m.devices[at-1].priority < priority {
+		m.devices[at] = m.devices[at-1]
+		at--
+	}
+	m.devices[at] = slot{d, base, size, priority}
+	m.ndevices++
+
+	clear(m.owner[:])
+	for i := 0; i < m.ndevices; i++ {
+		s := &m.devices[i]
+		for a := uint32(s.base); a < uint32(s.base)+uint32(s.size); a += 2 {
+			m.owner[(a-IOPage)/2] = uint8(i + 1)
+		}
+	}
+	return true
+}
+
+// PSW answers the processor status word.
+func (m *Machine) PSW() uint16 {
+	return m.psw
+}
+
+// SetPSW sets the processor status word as the console does, every bit of it.
+func (m *Machine) SetPSW(v uint16) {
+	m.setPSW(v)
+}
+
+// Examine reads the word at the address a as the console does: it goes through
+// the bus, so a device's register is read with whatever reading it does to the
+// device. It reports false for an odd address and for one nothing answers at.
+func (m *Machine) Examine(a uint16) (uint16, bool) {
+	pending := m.traps
+	m.traps = 0
+	v := m.read(a, 2)
+	ok := m.traps&aborts == 0
+	m.traps = pending | attention
+	return v, ok
+}
+
+// Deposit writes the word at the address a as the console does, and reports
+// false where Examine would.
+func (m *Machine) Deposit(a, v uint16) bool {
+	pending := m.traps
+	m.traps = 0
+	m.write(a, 2, v)
+	ok := m.traps&aborts == 0
+	m.traps = pending | attention
+	return ok
+}
+
+// Load deposits the words of program from the address a up and reports whether
+// all of them went in.
+func (m *Machine) Load(a uint16, program []uint16) bool {
+	for i := 0; i < len(program); i++ {
+		if !m.Deposit(a+uint16(2*i), program[i]) {
+			return false
+		}
+	}
+	return true
+}

@@ -1,0 +1,207 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package dl11 is the DL11 asynchronous line interface, which is the console
+// when it is at 177560 with its vectors at 060 and 064.
+//
+// A Line is shared by three cogs, and no lock is needed between them because
+// every variable two cogs share is written by one of them only. The cog that
+// steps the machine owns the registers. The cog that reads the serial line
+// calls Put and owns the head of the ring of bytes received. The cog that
+// writes the serial line calls Next and Sent and owns the count of bytes sent.
+//
+// Nothing here knows about the Propeller 2: what reads and writes the serial
+// line is the program's.
+
+const (
+	// The registers, by their distance from the first.
+	rcsr = 0 // receiver status
+	rbuf = 2 // receiver buffer
+	xcsr = 4 // transmitter status
+	xbuf = 6 // transmitter buffer
+
+	// Size is how many bytes of the I/O page a Line takes.
+	Size = 8
+
+	// The bits of the two status registers a program reads, of which it writes
+	// the first.
+	enable = 1 << 6 // interrupt enable
+	done   = 1 << 7 // a byte was received; the transmitter is ready for one
+
+	// ringSize is how many bytes wait to be read by a program that has fallen
+	// behind the line. It is a power of two so that an index wraps by a mask.
+	ringSize = 256
+)
+
+// A Line is one DL11. The zero Line is ready to be attached; Reset brings it to
+// the state it powers up in.
+type Line struct {
+	rx  uint16 // receiver status
+	tx  uint16 // transmitter status
+	in  uint16 // receiver buffer
+	out uint16 // transmitter buffer
+
+	rxRequest bool // the receiver requests an interrupt
+	txRequest bool // the transmitter does
+
+	ring [ringSize]byte
+	head uint32 // bytes received, written by the receiving cog only
+	tail uint32 // bytes handed to the program, written by the machine's cog only
+
+	written uint32 // bytes the program wrote, written by the machine's cog only
+	sent    uint32 // bytes that left, written by the transmitting cog only
+
+	// Lost counts the bytes that arrived while the ring was full.
+	Lost uint32
+
+	rxVector uint16
+	txVector uint16
+}
+
+// Vectors says which vectors the receiver and the transmitter interrupt
+// through. The console's are 060 and 064, which is what a Line not told
+// otherwise uses.
+func (l *Line) Vectors(receiver, transmitter uint16) {
+	l.rxVector = receiver
+	l.txVector = transmitter
+}
+
+// Put hands the line a byte that has arrived. It is what the cog reading the
+// serial line calls, and that cog only.
+func (l *Line) Put(b byte) {
+	if l.head-l.tail == ringSize {
+		l.Lost++
+		return
+	}
+	l.ring[l.head&(ringSize-1)] = b
+	l.head++
+}
+
+// Pending reports whether the program has written a byte that has not left.
+func (l *Line) Pending() bool {
+	return l.written != l.sent
+}
+
+// Next waits for the program to write a byte and answers it. The byte counts
+// as on its way until Sent is called. It is what the cog writing the serial
+// line calls, and that cog only.
+func (l *Line) Next() byte {
+	for l.written == l.sent {
+	}
+	return byte(l.out)
+}
+
+// Sent says the byte Next answered has left, which makes the transmitter ready
+// for the next one.
+func (l *Line) Sent() {
+	l.sent++
+}
+
+// Reset is the Device method.
+func (l *Line) Reset() {
+	if l.rxVector == 0 {
+		l.rxVector, l.txVector = 0o060, 0o064
+	}
+	l.rx = 0
+	l.tx = done
+	l.rxRequest = false
+	l.txRequest = false
+	l.tail = l.head // what was received and not read is gone
+}
+
+// update brings the registers up to what the other two cogs have done since.
+func (l *Line) update() {
+	if l.rx&done == 0 && l.tail != l.head {
+		l.in = uint16(l.ring[l.tail&(ringSize-1)])
+		l.tail++
+		l.rx |= done
+		if l.rx&enable != 0 {
+			l.rxRequest = true
+		}
+	}
+	if l.tx&done == 0 && l.written == l.sent {
+		l.tx |= done
+		if l.tx&enable != 0 {
+			l.txRequest = true
+		}
+	}
+}
+
+// Read is the Device method.
+func (l *Line) Read(a uint16) uint16 {
+	l.update()
+	switch a & 6 {
+	case rcsr:
+		return l.rx
+	case rbuf:
+		l.rx &^= done
+		l.rxRequest = false
+		return l.in
+	case xcsr:
+		return l.tx
+	}
+	return l.out
+}
+
+// Write is the Device method. What a program writes is in the lower byte of
+// each register, but writing either byte of the transmitter buffer sends what
+// the buffer then holds.
+//
+// Enabling interrupts while a status register says done requests one, and
+// disabling them withdraws the request.
+func (l *Line) Write(a, v, mask uint16) {
+	l.update()
+	switch a & 6 {
+	case rcsr:
+		if mask&enable == 0 {
+			return
+		}
+		switch {
+		case v&enable == 0:
+			l.rxRequest = false
+		case l.rx&(done|enable) == done:
+			l.rxRequest = true
+		}
+		l.rx = l.rx&^enable | v&enable
+	case xcsr:
+		if mask&enable == 0 {
+			return
+		}
+		switch {
+		case v&enable == 0:
+			l.txRequest = false
+		case l.tx&(done|enable) == done:
+			l.txRequest = true
+		}
+		l.tx = l.tx&^enable | v&enable
+	case xbuf:
+		if mask&0xff != 0 {
+			l.out = v & 0xff
+		}
+		l.tx &^= done
+		l.txRequest = false
+		l.written++
+	}
+}
+
+// Request is the Device method. The receiver goes first.
+func (l *Line) Request() uint16 {
+	l.update()
+	switch {
+	case l.rxRequest:
+		return l.rxVector
+	case l.txRequest:
+		return l.txVector
+	}
+	return 0
+}
+
+// Granted is the Device method.
+func (l *Line) Granted(vector uint16) {
+	if vector == l.rxVector {
+		l.rxRequest = false
+		return
+	}
+	l.txRequest = false
+}

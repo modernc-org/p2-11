@@ -1,0 +1,79 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Command p2-11 is a PDP-11/40 on a Propeller 2. Its console is the serial
+// line the program was loaded through, so the terminal of "ogo run" is the
+// terminal of the PDP-11.
+//
+// The machine takes three cogs. One steps the processor. One does nothing but
+// read the serial line, because a byte that arrives while a cog is elsewhere
+// is lost. One writes the serial line, a byte taking as long to leave as forty
+// or so instructions take to execute.
+
+import (
+	"p2"
+
+	"modernc.org/p2-11/dl11"
+	"modernc.org/p2-11/mac"
+	"modernc.org/p2-11/pdp11"
+)
+
+var (
+	machine pdp11.Machine
+	console dl11.Line
+)
+
+// receive hands the console what arrives on the serial line.
+func receive() {
+	for {
+		console.Put(byte(p2.ReadByte(0)))
+	}
+}
+
+// transmit puts what the console sends on the serial line.
+func transmit() {
+	for {
+		p2.WriteByte(console.Next())
+		console.Sent()
+	}
+}
+
+// run loads a program, starts it, and runs the machine until it halts. It
+// reports whether it did.
+func run(at, start uint16, program []uint16) bool {
+	machine.Reset()
+	if !machine.Load(at, program) {
+		println("the program does not fit the memory")
+		return false
+	}
+	machine.R[7] = start
+	for {
+		switch machine.Run(1 << 20) {
+		case pdp11.Halted:
+			return true
+		case pdp11.Faulted:
+			printf("\r\nno vector or no stack for a trap, PC %06o SP %06o PSW %06o\r\n",
+			machine.R[7], machine.R[6], machine.PSW())
+			return false
+		}
+	}
+}
+
+func main() {
+	if !machine.Attach(&console, 0o177560, dl11.Size, 4) {
+		println("no room on the bus for the console")
+		return
+	}
+	go receive()
+	go transmit()
+
+	t := p2.GetMs()
+	run(mac.BenchAt, mac.BenchStart, mac.Bench[:])
+	t = p2.GetMs() - t
+	n := machine.Count
+	printf("\r\n%d instructions in %d ms, %d a second\r\n", n, t, uint64(n)*1000/uint64(t))
+
+	run(mac.DemoAt, mac.DemoStart, mac.Demo[:])
+	printf("PC %06o\r\n", machine.R[7])
+}

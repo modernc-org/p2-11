@@ -1,0 +1,191 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+import "testing"
+
+// The processor against the vectors of vectors_test.ogo, which say what the
+// 11/40 of SimH made of each instruction. scripts/vectors.py writes them and
+// has the other half of what is said here about where a case's memory is.
+
+const (
+	// region is where a case's memory is laid out: the first bytes of it, which
+	// are compared word by word. Of the rest a case names what it touches.
+	region = 0o4000
+
+	// A case is this many numbers and then three for every word it names.
+	caseSize = 2 + 2*stateSize
+
+	// The machine before and after is R0 to R5 and then these.
+	stateSP   = 6
+	stateKSP  = 7
+	stateUSP  = 8
+	statePC   = 9
+	statePSW  = 10
+	stateSize = 11
+
+	// maxFailures is how many cases are reported before the test gives up.
+	maxFailures = 10
+
+	user = 3
+)
+
+var stateNames = [stateSize]string{"R0", "R1", "R2", "R3", "R4", "R5", "SP", "KSP", "USP", "PC", "PSW"}
+
+var (
+	// vm is the machine the vectors run on. It is too large for a stack.
+	vm Machine
+
+	// want is what a case's memory is to be after it.
+	want [region / 2]uint16
+
+	// current is the case being run, number says which it is, and good that
+	// nothing has differed in it so far.
+	current []uint16
+	number  int
+	good    bool
+)
+
+// background is what the address a holds before a case puts its own there: the
+// vectors of the traps, each leading to two NOPs, and nothing else.
+func background(a uint16) uint16 {
+	switch {
+	case a >= 0o4 && a < 0o40:
+		if a&2 == 0 {
+			return 0o3400 + a
+		}
+		return 0o340 + a>>2
+	case a >= 0o3404 && a < 0o3440:
+		return 0o000240
+	}
+	return 0
+}
+
+func TestVectors(t *testing.T) {
+	failures := 0
+	number = 0
+	for part := 0;; part++ {
+		v := vectors(part)
+		if len(v) == 0 {
+			break
+		}
+		for len(v) != 0 {
+			size := caseSize + 3*int(v[1])
+			current = v[:size]
+			runCase()
+			if !good {
+				t.Fail()
+				failures++
+				if failures == maxFailures {
+					println("and there may be more")
+					return
+				}
+			}
+			v = v[size:]
+			number++
+		}
+	}
+	println(number, "vectors")
+}
+
+// runCase runs the current case and leaves in good whether the machine came
+// out of it as the reference did, having said what differs if it did not.
+func runCase() {
+	before := current[2 : 2+stateSize]
+	after := current[2+stateSize : caseSize]
+	words := current[caseSize:]
+
+	for a := uint16(0); a < region; a += 2 {
+		v := background(a)
+		vm.mem[a>>1] = v
+		want[a>>1] = v
+	}
+	for i := 0; i < len(words); i += 3 {
+		a := words[i]
+		vm.mem[a>>1] = words[i+1]
+		if a < region {
+			want[a>>1] = words[i+2]
+		}
+	}
+
+	vm.Reset()
+	copy(vm.R[:6], before)
+	vm.sp[kernel] = before[stateKSP]
+	vm.sp[user] = before[stateUSP]
+	vm.psw = before[statePSW]
+	vm.R[6] = before[stateSP]
+	vm.R[7] = before[statePC]
+
+	for i := 0; i < int(current[0]); i++ {
+		if s := vm.Step(); s == Halted || s == Faulted {
+			break
+		}
+	}
+
+	good = true
+	for i := 0; i < stateSize; i++ {
+		if got := state(i); got != after[i] {
+			differs()
+			printf("\t%s %06o, want %06o\n", stateNames[i], got, after[i])
+		}
+	}
+	for a := 0; a < region; a += 2 {
+		if got := vm.mem[a>>1]; got != want[a>>1] {
+			differs()
+			printf("\tmemory at %06o %06o, want %06o\n", a, got, want[a>>1])
+		}
+	}
+	for i := 0; i < len(words); i += 3 {
+		if a := words[i]; a >= region {
+			if got := vm.mem[a>>1]; got != words[i+2] {
+				differs()
+				printf("\tmemory at %06o %06o, want %06o\n", a, got, words[i+2])
+			}
+			vm.mem[a>>1] = 0 // as the next case expects to find it
+		}
+	}
+}
+
+// state answers the part of the machine that a case has at i.
+func state(i int) uint16 {
+	switch i {
+	case stateSP:
+		return vm.R[6]
+	case stateKSP:
+		return stack(kernel)
+	case stateUSP:
+		return stack(user)
+	case statePC:
+		return vm.R[7]
+	case statePSW:
+		return vm.psw
+	}
+	return vm.R[i]
+}
+
+// stack answers the stack pointer of a mode.
+func stack(mode uint16) uint16 {
+	if vm.psw>>14 == mode {
+		return vm.R[6]
+	}
+	return vm.sp[mode]
+}
+
+// differs notes that the current case is not good, and says which case it is
+// if that is news.
+func differs() {
+	if !good {
+		return
+	}
+	good = false
+	words := current[caseSize:]
+	pc := current[2+statePC]
+	ir := background(pc)
+	for i := 0; i < len(words); i += 3 {
+		if words[i] == pc {
+			ir = words[i+1]
+		}
+	}
+	printf("vector %d, instruction %06o at %06o, status word %06o, %d steps\n",
+	number, ir, pc, current[2+statePSW], current[0])
+}
