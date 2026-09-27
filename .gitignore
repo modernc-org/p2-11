@@ -1,0 +1,29 @@
+tmp/
+
+# ogo build artifacts
+*.binary
+*.p2asm
+
+# Guest software never enters the repository, whatever its license; see
+# CLAUDE.md. guest/ is the place to keep it, and the patterns are a second net
+# for an image or a kit dropped anywhere else. They match either case, since a
+# file bound for the SD card has an upper-case 8.3 name.
+/guest/
+*.[dD][sS][kK]
+*.[iI][mM][gG]
+*.[rR][kK]05
+*.[rR][lL]0[12]
+*.[rR][xX]0[12]
+*.[tT][aA][pP]
+*.[pP][tT][aA][pP]
+*.[aA][bB][sS]
+*.[lL][dD][aA]
+*.[rR][oO][mM]
+*.[zZ][iI][pP]
+*.[gG][zZ]
+*.[tT][gG][zZ]
+*.[zZ]
+
+# Local assistant state, as in ogo's .gitignore: a `git add -A` would otherwise
+# sweep it into a repository that is meant to become public.
+.claude/
