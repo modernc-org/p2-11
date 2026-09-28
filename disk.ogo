@@ -1,0 +1,130 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// The disk: an RK11 whose packs are files on the SD card in the slot of a P2
+// Edge module. RK0.DSK is the pack of drive 0, and so on to RK7.DSK. A pack
+// is a file of 4872 blocks or more that is in one piece, which it is when it
+// was copied to a card that was empty, or that has not had a file deleted.
+
+import (
+	"p2"
+
+	"modernc.org/p2-11/fat"
+	"modernc.org/p2-11/rk11"
+	"modernc.org/p2-11/sd"
+)
+
+// The pins of the slot.
+const (
+	cardClock  = 61
+	cardSelect = 60
+	cardIn     = 59
+	cardOut    = 58
+)
+
+// A pack is the file of a drive, by the block of the card it begins at.
+type pack struct {
+	first uint32
+}
+
+type trouble struct {
+	what string
+}
+
+func (t *trouble) Error() string {
+	return t.what
+}
+
+var (
+	errNoPack = trouble{"no pack has such a block"}
+	errShort  = trouble{"the file is shorter than a pack"}
+)
+
+var (
+	card   sd.Card
+	volume fat.Volume
+	disk   rk11.Controller
+	packs  [8]pack
+
+	names = [...]string{
+		"RK0.DSK", "RK1.DSK", "RK2.DSK", "RK3.DSK", "RK4.DSK", "RK5.DSK", "RK6.DSK", "RK7.DSK",
+	}
+
+	// What the cog of the disk has found, written by it only: whether it
+	// has looked, what was wrong with the card, and with the file of a
+	// drive. A drive has a pack if nothing was.
+	looked  bool
+	noCard  error
+	noDrive [8]error
+)
+
+func (p *pack) Read(block uint32, b []byte) error {
+	if block >= rk11.Blocks {
+		return &errNoPack
+	}
+	return card.Read(p.first+block, b)
+}
+
+func (p *pack) Write(block uint32, b []byte) error {
+	if block >= rk11.Blocks {
+		return &errNoPack
+	}
+	return card.Write(p.first+block, b)
+}
+
+// find looks for the file of a drive and puts it in the drive if it is a
+// pack.
+func find(drive int) error {
+	f, err := volume.Find(names[drive])
+	if err != nil {
+		return err
+	}
+	if f.Blocks < rk11.Blocks {
+		return &errShort
+	}
+	packs[drive].first = f.Block
+	disk.Attach(drive, &packs[drive], false)
+	return nil
+}
+
+// turn is the cog of the disk. It opens the card, since the pins of a card
+// are those of the cog that has opened it, puts the packs in their drives,
+// and does from then on what the controller wants done.
+func turn() {
+	noCard = card.Open(cardClock, cardSelect, cardIn, cardOut)
+	if noCard == nil {
+		noCard = volume.Mount(&card)
+	}
+	for i := range noDrive {
+		noDrive[i] = noCard
+		if noCard == nil {
+			noDrive[i] = find(i)
+		}
+	}
+	looked = true
+	disk.Serve()
+}
+
+// drives starts the cog of the disk, waits until it has looked at the card,
+// and says what it has found. It reports whether there is a pack to begin
+// with, which is one in drive 0.
+func drives() bool {
+	go turn()
+	for !looked {
+		p2.WaitMs(1)
+	}
+	if noCard != nil {
+		printf("%s\r\n", noCard.Error())
+		return false
+	}
+	for i, err := range noDrive {
+		switch {
+		case err == nil:
+			printf("%s is the pack in drive %d\r\n", names[i], i)
+		case err != &fat.ErrNotFound:
+			printf("%s: %s\r\n", names[i], err.Error())
+		}
+	}
+	return noDrive[0] == nil
+}

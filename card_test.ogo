@@ -1,0 +1,130 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+import (
+	"p2"
+	"testing"
+
+	"modernc.org/p2-11/fat"
+	"modernc.org/p2-11/sd"
+)
+
+// The card in the slot, as the disk of a volume that has a file of 4872
+// blocks on it, TEST.DSK, every block of which is its own number 128 times.
+// That is an RK05 pack's worth, and the only blocks of the card that are
+// written to here. A board that has no such card passes, saying so.
+//
+// The card is this cog's here, which opens it for a test and closes it after.
+// The tests of the disk, where it is the cog's of the disk, come after these.
+
+const testPack = 4872 // blocks
+
+var (
+	test   fat.File
+	absent bool
+
+	written [sd.BlockSize]byte
+	read    [sd.BlockSize]byte
+)
+
+// open opens the card and reports whether it has the file to test with,
+// which is then test.
+func open(t *testing.T) bool {
+	if absent {
+		return false
+	}
+	err := card.Open(cardClock, cardSelect, cardIn, cardOut)
+	if err == nil {
+		err = volume.Mount(&card)
+	}
+	if err == nil {
+		test, err = volume.Find("TEST.DSK")
+	}
+	switch {
+	case err == nil && test.Blocks == testPack:
+		return true
+	case err == nil:
+		println("TEST.DSK has", test.Blocks, "blocks")
+		t.Fail()
+	case err == &sd.ErrNoCard || err == &fat.ErrNotFound:
+		println(err.Error())
+		println("nothing tested")
+	default:
+		println(err.Error())
+		t.Fail()
+	}
+	absent = true
+	card.Close()
+	return false
+}
+
+// number fills p with what the block n of the file holds.
+func number(n uint32, p []byte) {
+	for i := 0; i < len(p); i += 4 {
+		p[i] = byte(n)
+		p[i+1] = byte(n >> 8)
+		p[i+2] = byte(n >> 16)
+		p[i+3] = byte(n >> 24)
+	}
+}
+
+// check reads the block n of the file and fails the test unless it holds
+// what written does.
+func check(t *testing.T, n uint32) {
+	if err := card.Read(test.Block+n, read[:]); err != nil {
+		println("block", n, "of the file:", err.Error())
+		t.Fail()
+		return
+	}
+	if read != written {
+		println("block", n, "of the file is not what was written")
+		t.Fail()
+	}
+}
+
+func TestCardRead(t *testing.T) {
+	if !open(t) {
+		return
+	}
+	println("TEST.DSK begins at block", test.Block)
+	start := p2.GetMs()
+	for n := uint32(0); n < testPack && !t.Failed(); n++ {
+		number(n, written[:])
+		check(t, n)
+	}
+	println(testPack, "blocks read in", p2.GetMs()-start, "ms")
+	card.Close()
+}
+
+func TestCardWrite(t *testing.T) {
+	if !open(t) {
+		return
+	}
+	// Seventeen blocks of the file, its first and its last among them.
+	var us uint32
+	for i := uint32(0); i <= 16; i++ {
+		n := i * (testPack - 1) / 16
+		for i := range written {
+			written[i] = byte(i) ^ byte(i>>8) ^ byte(n)
+		}
+		start := p2.GetUs()
+		err := card.Write(test.Block+n, written[:])
+		us += p2.GetUs() - start
+		if err != nil {
+			println("block", n, "of the file:", err.Error())
+			t.Fail()
+		}
+		check(t, n)
+
+		// And what the block had.
+		number(n, written[:])
+		if err := card.Write(test.Block+n, written[:]); err != nil {
+			println("block", n, "of the file:", err.Error())
+			t.Fail()
+		}
+		check(t, n)
+	}
+	println(us/17, "microseconds to write a block")
+	card.Close()
+}

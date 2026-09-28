@@ -34,13 +34,23 @@ const (
 )
 
 var (
-	wire dl11.Line
+	wire  dl11.Line
+	onBus bool
 
 	// What the cog that takes the transmitter's bytes has seen, written by it
 	// only.
 	taken   int
 	garbled int
 )
+
+// bus puts the devices on the machine's bus, once, and reports whether they
+// are there.
+func bus() bool {
+	if !onBus {
+		onBus = attach()
+	}
+	return onBus
+}
 
 // arrive is the cog that reads the serial line: bytes come in at the pace of
 // the line, each the low byte of its number.
@@ -118,7 +128,7 @@ func TestCogsTransmit(t *testing.T) {
 // second less a cycle at the least and a second at the most, and a
 // millisecond is allowed for what is not the clock's.
 func TestCogsClock(t *testing.T) {
-	if !attach() {
+	if !bus() {
 		println("no room on the bus")
 		t.Fail()
 		return

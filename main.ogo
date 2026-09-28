@@ -6,11 +6,15 @@
 // line the program was loaded through, so the terminal of "ogo run" is the
 // terminal of the PDP-11.
 //
-// The machine takes four cogs. One steps the processor. One does nothing but
+// The machine takes five cogs. One steps the processor. One does nothing but
 // read the serial line, because a byte that arrives while a cog is elsewhere
 // is lost. One writes the serial line, a byte taking as long to leave as forty
 // or so instructions take to execute. One counts the cycles of a power line
-// there is none of, for the line clock.
+// there is none of, for the line clock. One moves blocks between the SD card
+// and memory, for the disk.
+//
+// With a card in the slot that has a file RK0.DSK, the machine begins with
+// what is on that pack. Without one it runs a program of its own.
 
 import (
 	"p2"
@@ -19,6 +23,7 @@ import (
 	"modernc.org/p2-11/kw11"
 	"modernc.org/p2-11/mac"
 	"modernc.org/p2-11/pdp11"
+	"modernc.org/p2-11/rk11"
 )
 
 // hz is how many cycles a second the power line has: sixty where the PDP-11
@@ -64,7 +69,11 @@ func line() {
 // attach puts the devices on the machine's bus. It reports whether there was
 // room for them.
 func attach() bool {
+	disk.Connect(&machine, 0)
 	if !machine.Attach(&clock, 0o177546, kw11.Size, 6) {
+		return false
+	}
+	if !machine.Attach(&disk, 0o177400, rk11.Size, 5) {
 		return false
 	}
 	return machine.Attach(&console, 0o177560, dl11.Size, 4)
@@ -99,6 +108,7 @@ func main() {
 	go receive()
 	go transmit()
 	go line()
+	pack := drives()
 
 	t := p2.GetMs()
 	run(mac.BenchAt, mac.BenchStart, mac.Bench[:])
@@ -111,6 +121,10 @@ func main() {
 	t = p2.GetMs() - t
 	printf("%d cycles of the line clock in %d ms\r\n", machine.R[3], t)
 
-	run(mac.DemoAt, mac.DemoStart, mac.Demo[:])
+	if pack {
+		run(mac.BootAt, mac.BootStart, mac.Boot[:])
+	} else {
+		run(mac.DemoAt, mac.DemoStart, mac.Demo[:])
+	}
 	printf("PC %06o\r\n", machine.R[7])
 }

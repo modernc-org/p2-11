@@ -3,136 +3,120 @@
 // license that can be found in the LICENSE file.
 
 import (
-	"p2"
 	"testing"
 
-	"modernc.org/p2-11/fat"
+	"modernc.org/p2-11/mac"
+	"modernc.org/p2-11/pdp11"
+	"modernc.org/p2-11/rk11"
 	"modernc.org/p2-11/sd"
 )
 
-// The card in the slot, as the disk of a volume that has a file of 4872
-// blocks on it, TEST.DSK, every block of which is its own number 128 times.
-// That is an RK05 pack's worth, and the only blocks of the card that are
-// written to here. A board that has no such card passes, saying so.
+// The disk with everything there is to it: the machine on this cog, the
+// controller between this and the cog of the disk, and the card. The program
+// is mac/disk.mac, the pack in drive 0 is TEST.DSK, and what the program
+// leaves is what it leaves in SimH. The blocks it writes are given back what
+// they had, through the controller, the card being the other cog's from
+// here on.
 
-// The pins of the slot of a P2 Edge module.
 const (
-	cardClock  = 61
-	cardSelect = 60
-	cardIn     = 59
-	cardOut    = 58
+	rkcs = 0o177404
+	rkwc = 0o177406
+	rkba = 0o177410
+	rkda = 0o177412
+
+	writeBlock = 0o003
+	checkBlock = 0o007
+	diskDone   = 0o200
+	diskFailed = 0o100000
+
+	somewhere = 0o20000 // in memory
 )
 
-const pack = 4872 // blocks
+// A second is the pack in drive 1, which is made up: a block of it is its
+// own number 128 times, and the number of the drive in every other word.
+type second struct{}
 
 var (
-	card   sd.Card
-	volume fat.Volume
-	test   fat.File
-	absent bool
-
-	written [sd.BlockSize]byte
-	read    [sd.BlockSize]byte
+	other   second
+	noWrite = trouble{"a pack that is made up is not written to"}
 )
 
-// find reports whether there is a card with the file to test with, which is
-// then test.
-func find(t *testing.T) bool {
-	if absent {
-		return false
+func (s *second) Read(block uint32, b []byte) error {
+	for i := 0; i < len(b); i += 4 {
+		b[i] = byte(block)
+		b[i+1] = byte(block >> 8)
+		b[i+2] = 1
+		b[i+3] = 0
 	}
-	if test.Blocks != 0 {
-		return true
+	return nil
+}
+
+func (s *second) Write(block uint32, b []byte) error {
+	return &noWrite
+}
+
+// do has the controller do a function with a block of the pack in drive 0
+// and the memory at somewhere, waits for it, and answers what the controller
+// then says.
+func do(function uint16, block uint32) uint16 {
+	machine.Deposit(rkda, uint16(block/12)<<4|uint16(block%12))
+	machine.Deposit(rkba, somewhere)
+	machine.Deposit(rkwc, 0o177400)
+	machine.Deposit(rkcs, function)
+	for {
+		if v, _ := machine.Examine(rkcs); v&diskDone != 0 {
+			return v
+		}
 	}
-	err := card.Open(cardClock, cardSelect, cardIn, cardOut)
-	if err == nil {
-		err = volume.Mount(&card)
-	}
-	if err == nil {
-		test, err = volume.Find("TEST.DSK")
-	}
+}
+
+func TestDiskProgram(t *testing.T) {
+	names[0] = "TEST.DSK"
 	switch {
-	case err == nil && test.Blocks == pack:
-		return true
-	case err == nil:
-		println("TEST.DSK has", test.Blocks, "blocks")
+	case !bus():
+		println("no room on the bus")
 		t.Fail()
-	case err == &sd.ErrNoCard || err == &fat.ErrNotFound:
-		println(err.Error())
+		return
+	case !drives():
+		if noCard != &sd.ErrNoCard && noCard != nil {
+			t.Fail()
+		}
 		println("nothing tested")
-	default:
-		println(err.Error())
-		t.Fail()
-	}
-	absent = true
-	test = fat.File{}
-	return false
-}
-
-// number fills p with what the block n of the file holds.
-func number(n uint32, p []byte) {
-	for i := 0; i < len(p); i += 4 {
-		p[i] = byte(n)
-		p[i+1] = byte(n >> 8)
-		p[i+2] = byte(n >> 16)
-		p[i+3] = byte(n >> 24)
-	}
-}
-
-// check reads the block n of the file and fails the test unless it holds
-// what written does.
-func check(t *testing.T, n uint32) {
-	if err := card.Read(test.Block+n, read[:]); err != nil {
-		println("block", n, "of the file:", err.Error())
-		t.Fail()
 		return
 	}
-	if read != written {
-		println("block", n, "of the file is not what was written")
+	disk.Attach(1, &other, false)
+
+	for a := uint32(0); a < pdp11.IOPage; a += 2 {
+		machine.Deposit(uint16(a), 0)
+	}
+	if !run(mac.DiskAt, mac.DiskStart, mac.Disk[:]) {
+		println("the program did not halt")
 		t.Fail()
 	}
-}
-
-func TestDiskRead(t *testing.T) {
-	if !find(t) {
-		return
+	if machine.R[7] != mac.DiskHalts || machine.R[5] != mac.DiskTableAt+2*uint16(len(mac.DiskTable)) {
+		printf("PC %06o, and the table ends at %06o\n", machine.R[7], machine.R[5])
+		t.Fail()
 	}
-	println("TEST.DSK begins at block", test.Block)
-	start := p2.GetMs()
-	for n := uint32(0); n < pack && !t.Failed(); n++ {
-		number(n, written[:])
-		check(t, n)
-	}
-	println(pack, "blocks read in", p2.GetMs()-start, "ms")
-}
-
-func TestDiskWrite(t *testing.T) {
-	if !find(t) {
-		return
-	}
-	// Seventeen blocks of the file, its first and its last among them.
-	var us uint32
-	for i := uint32(0); i <= 16; i++ {
-		n := i * (pack - 1) / 16
-		for i := range written {
-			written[i] = byte(i) ^ byte(i>>8) ^ byte(n)
-		}
-		start := p2.GetUs()
-		err := card.Write(test.Block+n, written[:])
-		us += p2.GetUs() - start
-		if err != nil {
-			println("block", n, "of the file:", err.Error())
+	wrong := 0
+	for i, want := range mac.DiskTable {
+		a := mac.DiskTableAt + 2*uint16(i)
+		if got, _ := machine.Examine(a); got != want && wrong < 10 {
+			printf("%06o: %06o, want %06o\n", a, got, want)
+			wrong++
 			t.Fail()
 		}
-		check(t, n)
+	}
 
-		// And what the block had.
-		number(n, written[:])
-		if err := card.Write(test.Block+n, written[:]); err != nil {
-			println("block", n, "of the file:", err.Error())
+	// What the program has written to, as it was.
+	machine.Reset()
+	for block := uint32(200); block <= 203; block++ {
+		for i := uint16(0); i < rk11.BlockSize; i += 4 {
+			machine.Deposit(somewhere+i, uint16(block))
+			machine.Deposit(somewhere+i+2, 0)
+		}
+		if do(writeBlock, block)&diskFailed != 0 || do(checkBlock, block)&diskFailed != 0 {
+			println("block", block, "of TEST.DSK is not what it was")
 			t.Fail()
 		}
-		check(t, n)
 	}
-	println(us/17, "microseconds to write a block")
 }
