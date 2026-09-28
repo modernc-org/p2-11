@@ -1,0 +1,114 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+import (
+	"p2"
+	"testing"
+
+	"modernc.org/p2-11/dl11"
+)
+
+// The console between cogs that run at once. The tests of dl11 are one cog
+// that takes the part of three in turn, which says what the line does and
+// nothing of whether one cog sees what another has written, in the order it
+// was written in. That is what this asks, of the board, there being no other
+// place to ask it.
+
+const (
+	rcsr = 0o177560
+	rbuf = 0o177562
+	xcsr = 0o177564
+	xbuf = 0o177566
+	done = 0o200
+
+	// traffic is how many bytes go each way, and pace how many microseconds
+	// apart they arrive, which is a little closer than at 230400 baud.
+	traffic = 20000
+	pace    = 40
+
+	// patience is how many milliseconds a test waits for the traffic. It has
+	// a type because what it is compared with is unsigned, and the compiler
+	// of 2026-09-27 compares such a number with an untyped constant as though
+	// it had a sign: OCTOGO.md, 1.
+	patience uint32 = 10000
+)
+
+var (
+	wire dl11.Line
+
+	// What the cog that takes the transmitter's bytes has seen, written by it
+	// only.
+	taken   int
+	garbled int
+)
+
+// arrive is the cog that reads the serial line: bytes come in at the pace of
+// the line, each the low byte of its number.
+func arrive() {
+	for i := 0; i < traffic; i++ {
+		p2.WaitUs(pace)
+		wire.Put(byte(i))
+	}
+}
+
+// leave is the cog that writes the serial line: it takes what the program
+// sends, which is to be each byte once and in order.
+func leave() {
+	for i := 0; i < traffic; i++ {
+		if wire.Next() != byte(i) {
+			garbled++
+		}
+		wire.Sent()
+		taken++
+	}
+}
+
+func TestCogsReceive(t *testing.T) {
+	wire.Reset()
+	wire.Lost = 0
+	go arrive()
+
+	// This cog is the machine's: it reads what has arrived, through the
+	// registers.
+	received, wrong := 0, 0
+	start := p2.GetMs()
+	for received < traffic && p2.GetMs()-start < patience {
+		if wire.Read(rcsr)&done != 0 {
+			if wire.Read(rbuf) != uint16(received)&0xff {
+				wrong++
+			}
+			received++
+		}
+	}
+	if received != traffic || wrong != 0 || wire.Lost != 0 {
+		println("received", received, "of", traffic, "bytes,", wrong, "of them wrong,", wire.Lost, "lost")
+		t.Fail()
+	}
+}
+
+func TestCogsTransmit(t *testing.T) {
+	wire.Reset()
+	go leave()
+
+	// This cog is the machine's: it writes when the transmitter is ready, and
+	// now and then resets the line with the byte it has just written on its
+	// way, which does not call the byte back.
+	sent := 0
+	start := p2.GetMs()
+	for sent < traffic && p2.GetMs()-start < patience {
+		if wire.Read(xcsr)&done != 0 {
+			wire.Write(xbuf, uint16(sent)&0xff, 0xffff)
+			sent++
+			if sent%1000 == 0 {
+				wire.Reset()
+			}
+		}
+	}
+	for taken < traffic && p2.GetMs()-start < patience {
+	}
+	if sent != traffic || taken != traffic || garbled != 0 {
+		println("sent", sent, "of", traffic, "bytes,", taken, "were taken,", garbled, "of them wrong")
+		t.Fail()
+	}
+}
