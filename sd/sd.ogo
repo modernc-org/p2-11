@@ -13,7 +13,7 @@
 // the card checks what it is sent in the same way, so that a bit that did not
 // arrive is an error and not a block of a disk that is wrong from then on.
 //
-// A Card is used by one cog at a time.
+// A Card is used by the cog that has opened it, until that cog closes it.
 
 import "p2"
 
@@ -155,6 +155,17 @@ func (c *Card) Open(clk, cs, mosi, miso int) error {
 	err := c.setUp()
 	c.release()
 	return err
+}
+
+// Close lets go of the card and of its pins. A pin that a cog drives is not
+// another cog's to drive, so the cog that has opened a card closes it before
+// another one opens it.
+func (c *Card) Close() {
+	c.blocks = 0
+	p2.PinFloat(c.clk)
+	p2.PinFloat(c.cs)
+	p2.PinFloat(c.mosi)
+	p2.PinFloat(c.miso)
 }
 
 // Blocks answers how many blocks the card has.
