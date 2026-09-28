@@ -230,3 +230,37 @@ func (m *Machine) Load(a uint16, program []uint16) bool {
 	}
 	return true
 }
+
+// Fetch copies memory from the even address a up into p, a word in two bytes
+// and the lower byte first, and answers how many bytes there were before
+// memory ended.
+//
+// Fetch and Store are for a device that moves data between memory and itself
+// without the processor, as a disk does. Such a device has an address of 18
+// bits, of which memory answers at those below the I/O page of a machine
+// without memory management. They are the only methods of a Machine that a
+// cog may call that does not step it: they touch nothing but memory, a word
+// at a time, as the device would that takes the bus between two cycles of
+// the processor.
+func (m *Machine) Fetch(a uint32, p []byte) int {
+	n := 0
+	for i := a >> 1; n+1 < len(p) && i < MemWords; i++ {
+		v := m.mem[i]
+		p[n] = byte(v)
+		p[n+1] = byte(v >> 8)
+		n += 2
+	}
+	return n
+}
+
+// Store copies p to memory from the even address a up, two bytes to a word
+// and the lower byte first, and answers how many bytes went in before memory
+// ended.
+func (m *Machine) Store(a uint32, p []byte) int {
+	n := 0
+	for i := a >> 1; n+1 < len(p) && i < MemWords; i++ {
+		m.mem[i] = uint16(p[n]) | uint16(p[n+1])<<8
+		n += 2
+	}
+	return n
+}

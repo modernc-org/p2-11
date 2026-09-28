@@ -451,3 +451,42 @@ func TestRunAsSteps(t *testing.T) {
 	expect(t, "the status word of the stepped one", tm.PSW(), psw)
 	expect(t, "R3, which counts the traps", tm.R[3], 400)
 }
+
+// A device that moves data by itself reaches memory and nothing else, and is
+// told where memory ends.
+func TestTransfer(t *testing.T) {
+	fresh(nil)
+	var p [6]byte
+	tm.Deposit(0o4000, 0o123456)
+	tm.Deposit(0o4002, 0o000377)
+	if n := tm.Fetch(0o4000, p[:4]); n != 4 || p[0] != 0o056 || p[1] != 0o247 || p[2] != 0o377 || p[3] != 0 {
+		println("fetched", n, "bytes:", p[0], p[1], p[2], p[3])
+		t.Fail()
+	}
+	p = [6]byte{1, 2, 3, 4, 5, 6}
+	if n := tm.Store(0o4000, p[:5]); n != 4 {
+		println("stored", n, "of five bytes")
+		t.Fail()
+	}
+	v, _ := tm.Examine(0o4000)
+	expect(t, "the first word stored", v, 0x0201)
+	v, _ = tm.Examine(0o4002)
+	expect(t, "the second", v, 0x0403)
+	v, _ = tm.Examine(0o4004)
+	expect(t, "the word after them", v, 0)
+
+	// The last word of memory, the first of the I/O page, and where an
+	// address of 18 bits has nothing.
+	if n := tm.Store(IOPage-2, p[:]); n != 2 {
+		println("stored", n, "bytes at the end of memory")
+		t.Fail()
+	}
+	if n := tm.Fetch(IOPage-2, p[2:]); n != 2 || p[2] != 1 || p[3] != 2 {
+		println("fetched", n, "bytes at the end of memory:", p[2], p[3])
+		t.Fail()
+	}
+	if n := tm.Store(IOPage, p[:]) + tm.Fetch(0o600000, p[:]) + tm.Fetch(0o777560, p[:]); n != 0 {
+		println("a transfer went where no memory is")
+		t.Fail()
+	}
+}
