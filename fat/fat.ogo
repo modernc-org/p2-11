@@ -1,0 +1,299 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package fat finds a file of a FAT32 volume and says which blocks of the
+// disk are the file's.
+//
+// It is for a disk that holds the images of other disks. A file written once
+// to a volume that was empty is in one piece, and what reads and writes such
+// an image wants to know where the piece begins and how long it is, not a
+// file system. So nothing here reads or writes a file, a file in more than one
+// piece is an error, and the files are those of the volume's first directory
+// that have a name of eight characters and three.
+//
+// A Volume has one block of the disk in memory at a time, and is used by one
+// cog at a time.
+
+// BlockSize is how many bytes a block of the disk has.
+const BlockSize = 512
+
+// A Disk is what a volume is on: blocks, by their numbers.
+type Disk interface {
+	Read(block uint32, p []byte) error
+}
+
+// An Error is what went wrong with a volume.
+type Error struct {
+	what string
+}
+
+func (e *Error) Error() string {
+	return e.what
+}
+
+// What goes wrong with a volume, beside what goes wrong with its disk. They
+// are told apart by comparing, as in err == &fat.ErrNotFound.
+var (
+	ErrNoVolume   = Error{"fat: no FAT32 volume on the disk"}
+	ErrDamaged    = Error{"fat: the volume is damaged"}
+	ErrNotFound   = Error{"fat: no such file"}
+	ErrFragmented = Error{"fat: the file is in more than one piece"}
+)
+
+const (
+	// Where things are in the first block of a disk that is partitioned.
+	partitions    = 446 // four of them
+	partitionSize = 16
+	partitionType = 4
+	partitionAt   = 8
+	signature     = 510
+
+	// The types of a partition that has a FAT32 volume.
+	fat32    = 0x0b
+	fat32LBA = 0x0c
+
+	// Where things are in the first block of a volume.
+	bytesPerBlock    = 11
+	blocksPerCluster = 13
+	reservedBlocks   = 14
+	tables           = 16
+	rootEntries      = 17 // which a FAT32 volume has none of
+	tableSize16      = 22 // and neither this
+	volumeSize       = 32
+	tableSize        = 36
+	rootCluster      = 44
+
+	// Where things are in an entry of a directory.
+	entrySize    = 32
+	nameSize     = 11
+	attributes   = 11
+	clusterHigh  = 20
+	clusterLow   = 26
+	fileSize     = 28
+	noMore       = 0x00 // the name's first byte, in the entry after the last
+	deleted      = 0xe5 // and in an entry that is free
+	notAFile     = 0x18 // attributes of a volume's name and of a directory
+	partOfAName  = 0x0f // and of an entry holding a piece of a long name
+	attributeSet = 0x3f
+
+	// What the table says of a cluster: which cluster follows it, in 28
+	// bits, or that none does.
+	clusterBits = 0x0fffffff
+	lastCluster = 0x0ffffff8
+	perBlock    = BlockSize / 4
+)
+
+// A Volume is a FAT32 volume.
+type Volume struct {
+	disk Disk
+
+	perCluster uint32 // blocks
+	table      uint32 // the block the table begins at
+	data       uint32 // the block the clusters begin at, of which the first is 2
+	clusters   uint32 // how many clusters there are
+	root       uint32 // the cluster the first directory begins at
+
+	held    uint32 // the block in buf
+	holding bool
+	buf     [BlockSize]byte
+}
+
+// A File is where on the disk a file is.
+type File struct {
+	Block  uint32 // the first block of the file, as the disk counts
+	Blocks uint32 // how many there are, the last of which the file may not fill
+	Size   uint32 // in bytes
+}
+
+// Mount finds the volume on the disk: the first FAT32 partition, or all of a
+// disk that is not partitioned.
+func (v *Volume) Mount(d Disk) error {
+	v.disk = d
+	v.holding = false
+	v.clusters = 0
+	if err := v.hold(0); err != nil {
+		return err
+	}
+	if v.word(signature) != 0xaa55 {
+		return &ErrNoVolume
+	}
+	first := uint32(0)
+	if !v.begins() {
+		found := false
+		for e := partitions; e < signature && !found; e += partitionSize {
+			if t := v.buf[e+partitionType]; t == fat32 || t == fat32LBA {
+				first = v.long(e + partitionAt)
+				found = true
+			}
+		}
+		if !found {
+			return &ErrNoVolume
+		}
+		if err := v.hold(first); err != nil {
+			return err
+		}
+		if v.word(signature) != 0xaa55 || !v.begins() {
+			return &ErrNoVolume
+		}
+	}
+
+	v.perCluster = uint32(v.buf[blocksPerCluster])
+	v.table = first + v.word(reservedBlocks)
+	size := v.long(tableSize)
+	v.data = v.table + uint32(v.buf[tables])*size
+	v.root = v.long(rootCluster)
+	all := v.long(volumeSize)
+	if v.perCluster == 0 || size == 0 || first+all <= v.data {
+		return &ErrDamaged
+	}
+	v.clusters = (first + all - v.data) / v.perCluster
+	if v.clusters > size*perBlock-2 {
+		v.clusters = size*perBlock - 2
+	}
+	return nil
+}
+
+// Find answers where the file of that name is. Capital letters and small ones
+// are the same in a name.
+func (v *Volume) Find(name string) (File, error) {
+	var want [nameSize]byte
+	if v.clusters == 0 || !short(name, &want) {
+		return File{}, &ErrNotFound
+	}
+
+	// A directory is a file of entries, and takes the clusters the table
+	// says it does.
+	cluster := v.root
+	for n := uint32(0); n < v.clusters; n++ {
+		if cluster < 2 || cluster-2 >= v.clusters {
+			return File{}, &ErrDamaged
+		}
+		first := v.data + (cluster-2)*v.perCluster
+		for b := uint32(0); b < v.perCluster; b++ {
+			if err := v.hold(first + b); err != nil {
+				return File{}, err
+			}
+			for e := 0; e < BlockSize; e += entrySize {
+				switch {
+				case v.buf[e] == noMore:
+					return File{}, &ErrNotFound
+				case v.buf[e] == deleted:
+				case v.buf[e+attributes]&attributeSet == partOfAName:
+				case v.buf[e+attributes]&notAFile != 0:
+				case v.named(e, &want):
+					return v.file(v.word(e+clusterHigh)<<16|v.word(e+clusterLow), v.long(e+fileSize))
+				}
+			}
+		}
+		next, err := v.next(cluster)
+		if err != nil {
+			return File{}, err
+		}
+		if next >= lastCluster {
+			return File{}, &ErrNotFound
+		}
+		cluster = next
+	}
+	return File{}, &ErrDamaged
+}
+
+// file answers where the file is that begins at the cluster and has size
+// bytes, having seen that every cluster of it is followed by the next there
+// is.
+func (v *Volume) file(cluster, size uint32) (File, error) {
+	f := File{Blocks: (size + BlockSize - 1) / BlockSize, Size: size}
+	if size == 0 {
+		return f, nil
+	}
+	clusters := (f.Blocks + v.perCluster - 1) / v.perCluster
+	if cluster < 2 || cluster-2 >= v.clusters || clusters > v.clusters-(cluster-2) {
+		return File{}, &ErrDamaged
+	}
+	f.Block = v.data + (cluster-2)*v.perCluster
+	for last := cluster + clusters - 1; cluster <= last; cluster++ {
+		next, err := v.next(cluster)
+		if err != nil {
+			return File{}, err
+		}
+		if cluster == last && next < lastCluster || cluster != last && next != cluster+1 {
+			return File{}, &ErrFragmented
+		}
+	}
+	return f, nil
+}
+
+// next answers what the table says of a cluster.
+func (v *Volume) next(cluster uint32) (uint32, error) {
+	if err := v.hold(v.table + cluster/perBlock); err != nil {
+		return 0, err
+	}
+	return v.long(int(cluster%perBlock)*4) & clusterBits, nil
+}
+
+// hold has the block in buf.
+func (v *Volume) hold(block uint32) error {
+	if v.holding && v.held == block {
+		return nil
+	}
+	v.holding = false
+	if err := v.disk.Read(block, v.buf[:]); err != nil {
+		return err
+	}
+	v.held = block
+	v.holding = true
+	return nil
+}
+
+// begins reports whether the block in buf is one a FAT32 volume begins with.
+func (v *Volume) begins() bool {
+	if v.buf[0] != 0xeb && v.buf[0] != 0xe9 {
+		return false // no code is here to be run
+	}
+	return v.word(bytesPerBlock) == BlockSize && v.word(rootEntries) == 0 && v.word(tableSize16) == 0
+}
+
+// named reports whether the entry at e of the block in buf has the name.
+func (v *Volume) named(e int, want *[nameSize]byte) bool {
+	for i := 0; i < nameSize; i++ {
+		if v.buf[e+i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// word answers the two bytes at i of the block in buf, as a number.
+func (v *Volume) word(i int) uint32 {
+	return uint32(v.buf[i]) | uint32(v.buf[i+1])<<8
+}
+
+// long answers the four bytes at i of the block in buf, as a number.
+func (v *Volume) long(i int) uint32 {
+	return v.word(i) | v.word(i+2)<<16
+}
+
+// short writes the name as a directory has it: eight characters and three
+// with no dot between them, in capital letters, and spaces where the name has
+// fewer. It reports whether the name is one a directory can have so.
+func short(name string, to *[nameSize]byte) bool {
+	for i := range to {
+		to[i] = ' '
+	}
+	at, end := 0, 8
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c == '.' && end == 8 && at != 0:
+			at, end = 8, nameSize
+			continue
+		case c <= ' ' || c == '.' || c >= 0x7f || at == end:
+			return false
+		case c >= 'a' && c <= 'z':
+			c -= 'a' - 'A'
+		}
+		to[at] = c
+		at++
+	}
+	return at != 0
+}

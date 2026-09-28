@@ -1,0 +1,272 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+import "testing"
+
+// A disk that is made up block by block as it is read, which has a volume
+// with a directory of two clusters that are not neighbours, and in it what a
+// directory has beside files, and files in one piece and in several.
+
+// Where things are on the disk that is made up.
+const (
+	perCluster = 4
+	reserved   = 32
+	tableLen   = 8 // blocks, of which there are two tables
+	tableAt    = reserved
+	dataAt     = tableAt + 2*tableLen
+	volumeLen  = dataAt + (tableLen*perBlock-2)*perCluster
+
+	rootAt   = 2 // the directory's first cluster
+	rootThen = 9 // and its second
+)
+
+// An image is a disk that is made up. The volume begins at the block first,
+// after a block of partitions if that is not 0.
+type image struct {
+	first uint32
+	empty bool // there is nothing on the disk
+	fails bool // and nothing can be read
+
+	reads int
+}
+
+var errDisk = Error{"the disk cannot be read"}
+
+// An entry of the directory that is made up.
+type entry struct {
+	name       string
+	attributes byte
+	cluster    uint32
+	size       uint32
+}
+
+// What the directory has, one after another, the first cluster of it being
+// full of files that nobody asks for before the second one begins.
+var listed = [...]entry{
+	{"P2-11      ", 0x08, 0, 0},
+	{"\xe5NE     DSK", 0x20, 3, 100},
+	{"ONE     DSK", 0x0f, 0, 0},
+	{"SUB        ", 0x10, 20, 0},
+	{"ONE     DSK", 0x20, 3, 3*perCluster*BlockSize - 100},
+	{"PIECES  DSK", 0x20, 6, 3 * perCluster * BlockSize},
+	{"SHORT   DSK", 0x20, 12, 3 * perCluster * BlockSize},
+	{"FAR     DSK", 0x20, 254, 5 * perCluster * BlockSize},
+	{"EMPTY   DSK", 0x20, 0, 0},
+	{"BLOCK      ", 0x20, 30, 1},
+	{"OUTSIDE DSK", 0x20, 5000, 100},
+}
+
+const (
+	perDirectoryCluster = perCluster * BlockSize / entrySize
+	early               = 5 // how many of listed are in the first cluster
+)
+
+// follows is what the table says of a cluster.
+func follows(cluster uint32) uint32 {
+	switch cluster {
+	case 0:
+		return 0x0ffffff8
+	case 1, rootThen, 5, 10, 13, 258, 30:
+		return 0x0fffffff
+	case rootAt:
+		return rootThen
+	case 3, 4, 254, 255, 256, 257:
+		return cluster + 1
+	case 6: // PIECES.DSK is 6, 7 and 10
+		return 7
+	case 7:
+		return 10
+	case 12: // SHORT.DSK ends a cluster early
+		return 13
+	}
+	return 0
+}
+
+// put writes v at i of p, in as many bytes as size says.
+func put(p []byte, i, size int, v uint32) {
+	for ; size != 0; size-- {
+		p[i] = byte(v)
+		v >>= 8
+		i++
+	}
+}
+
+// list writes the entry that is the nth of the directory.
+func list(n int, p []byte) {
+	var e entry
+	switch {
+	case n < early:
+		e = listed[n]
+	case n < perDirectoryCluster:
+		e = entry{"FILLER  DSK", 0x20, 40, 1}
+	case n-perDirectoryCluster+early < len(listed):
+		e = listed[n-perDirectoryCluster+early]
+	default:
+		return
+	}
+	copy(p, e.name)
+	p[attributes] = e.attributes
+	put(p, clusterHigh, 2, e.cluster>>16)
+	put(p, clusterLow, 2, e.cluster&0xffff)
+	put(p, fileSize, 4, e.size)
+}
+
+func (d *image) Read(block uint32, p []byte) error {
+	d.reads++
+	if d.fails {
+		return &errDisk
+	}
+	clear(p)
+	if d.empty {
+		return nil
+	}
+	if block == 0 && d.first != 0 {
+		// The second partition is the volume, the first being of another kind.
+		p[partitions+partitionType] = 0x83
+		put(p, partitions+partitionAt, 4, 1)
+		p[partitions+partitionSize+partitionType] = fat32LBA
+		put(p, partitions+partitionSize+partitionAt, 4, d.first)
+		put(p, signature, 2, 0xaa55)
+		return nil
+	}
+	if block < d.first {
+		return nil
+	}
+	block -= d.first
+	switch {
+	case block == 0:
+		p[0] = 0xeb
+		put(p, bytesPerBlock, 2, BlockSize)
+		p[blocksPerCluster] = perCluster
+		put(p, reservedBlocks, 2, reserved)
+		p[tables] = 2
+		put(p, volumeSize, 4, volumeLen)
+		put(p, tableSize, 4, tableLen)
+		put(p, rootCluster, 4, rootAt)
+		put(p, signature, 2, 0xaa55)
+	case block >= tableAt && block < dataAt:
+		cluster := (block - tableAt) % tableLen * perBlock
+		for i := 0; i < BlockSize; i += 4 {
+			// The upper four bits are not the table's, and are set here.
+			put(p, i, 4, follows(cluster)|0xf0000000)
+			cluster++
+		}
+	case block >= dataAt:
+		n := -1
+		switch cluster := (block-dataAt)/perCluster + 2; cluster {
+		case rootAt:
+			n = 0
+		case rootThen:
+			n = perDirectoryCluster
+		}
+		if n >= 0 {
+			n += int((block-dataAt)%perCluster) * (BlockSize / entrySize)
+			for i := 0; i < BlockSize; i += entrySize {
+				list(n, p[i:i+entrySize])
+				n++
+			}
+		}
+	}
+	return nil
+}
+
+var (
+	disk   image
+	volume Volume
+)
+
+// mount answers the volume of the disk that is made up to begin at first.
+func mount(t *testing.T, first uint32) *Volume {
+	disk = image{first: first}
+	if err := volume.Mount(&disk); err != nil {
+		println(err.Error())
+		t.Fail()
+	}
+	return &volume
+}
+
+// find asks the volume for the file and fails the test unless the answer is
+// the error, and the file at the block, of so many blocks.
+func find(t *testing.T, v *Volume, name string, want error, block, blocks uint32) {
+	f, err := v.Find(name)
+	if err != want || f.Block != block || f.Blocks != blocks {
+		what := "no error"
+		if err != nil {
+			what = err.Error()
+		}
+		println(name, "is at", f.Block, "and of", f.Blocks, "blocks:", what)
+		t.Fail()
+	}
+}
+
+func TestMount(t *testing.T) {
+	for first := uint32(0); first <= 8192; first += 8192 {
+		v := mount(t, first)
+		if v.perCluster != perCluster || v.table != first+tableAt || v.data != first+dataAt {
+			println("a cluster of", v.perCluster, "blocks, the table at", v.table, "and the clusters at", v.data)
+			t.Fail()
+		}
+		if v.root != rootAt || v.clusters != tableLen*perBlock-2 {
+			println("the directory at", v.root, "of", v.clusters, "clusters")
+			t.Fail()
+		}
+	}
+}
+
+func TestNoVolume(t *testing.T) {
+	disk = image{empty: true}
+	if err := volume.Mount(&disk); err != &ErrNoVolume {
+		println("a volume is found on an empty disk")
+		t.Fail()
+	}
+	find(t, &volume, "ONE.DSK", &ErrNotFound, 0, 0)
+
+	disk = image{fails: true}
+	if err := volume.Mount(&disk); err != &errDisk {
+		println("a volume is found on a disk that cannot be read")
+		t.Fail()
+	}
+}
+
+func TestFind(t *testing.T) {
+	for first := uint32(0); first <= 8192; first += 8192 {
+		v := mount(t, first)
+		data := first + dataAt
+		find(t, v, "ONE.DSK", nil, data+(3-2)*perCluster, 3*perCluster)
+		find(t, v, "one.dsk", nil, data+(3-2)*perCluster, 3*perCluster)
+		find(t, v, "FAR.DSK", nil, data+(254-2)*perCluster, 5*perCluster)
+		find(t, v, "BLOCK", nil, data+(30-2)*perCluster, 1)
+		find(t, v, "BLOCK.", nil, data+(30-2)*perCluster, 1)
+		find(t, v, "EMPTY.DSK", nil, 0, 0)
+
+		find(t, v, "PIECES.DSK", &ErrFragmented, 0, 0)
+		find(t, v, "SHORT.DSK", &ErrFragmented, 0, 0)
+		find(t, v, "OUTSIDE.DSK", &ErrDamaged, 0, 0)
+
+		find(t, v, "NONE.DSK", &ErrNotFound, 0, 0)
+		find(t, v, "SUB", &ErrNotFound, 0, 0)
+		find(t, v, "P2-11", &ErrNotFound, 0, 0)
+		find(t, v, "NE.DSK", &ErrNotFound, 0, 0)
+		find(t, v, "", &ErrNotFound, 0, 0)
+		find(t, v, ".DSK", &ErrNotFound, 0, 0)
+		find(t, v, "ONE.DSK.", &ErrNotFound, 0, 0)
+		find(t, v, "ONE.DSKS", &ErrNotFound, 0, 0)
+		find(t, v, "ONE DSK", &ErrNotFound, 0, 0)
+		find(t, v, "LONGER-BY-FAR.DSK", &ErrNotFound, 0, 0)
+	}
+}
+
+// A block that is in memory is not read again, and a disk that fails does
+// so to whoever asked.
+func TestHold(t *testing.T) {
+	v := mount(t, 8192)
+	find(t, v, "FAR.DSK", nil, 8192+dataAt+(254-2)*perCluster, 5*perCluster)
+	before := disk.reads
+	if _, err := v.next(257); err != nil || disk.reads != before {
+		println("the block was read", disk.reads-before, "times more")
+		t.Fail()
+	}
+	disk.fails = true
+	find(t, v, "ONE.DSK", &errDisk, 0, 0)
+}
