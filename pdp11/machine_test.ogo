@@ -15,6 +15,18 @@ type bell struct {
 	ringing bool
 	granted int
 	resets  int
+
+	seen uint32 // how far the machine had come when it was last here
+	back int    // how often it had come less far than the time before
+}
+
+// look sees how far the machine has come.
+func (b *bell) look() {
+	if now := tm.Now(); now < b.seen {
+		b.back++
+	} else {
+		b.seen = now
+	}
 }
 
 func (b *bell) Reset() {
@@ -27,10 +39,12 @@ func (b *bell) Read(a uint16) uint16 {
 }
 
 func (b *bell) Write(a, v, mask uint16) {
+	b.look()
 	b.reg = b.reg&^mask | v&mask
 }
 
 func (b *bell) Request() uint16 {
+	b.look()
 	if b.ringing {
 		return b.vector
 	}
@@ -487,6 +501,50 @@ func TestTransfer(t *testing.T) {
 	}
 	if n := tm.Store(IOPage, p[:]) + tm.Fetch(0o600000, p[:]) + tm.Fetch(0o777560, p[:]); n != 0 {
 		println("a transfer went where no memory is")
+		t.Fail()
+	}
+}
+
+// The machine comes as far as the instructions it executes, and as far as
+// that when it waits.
+func TestNow(t *testing.T) {
+	fresh([]uint16{
+		0o000240, // 1000: NOP
+		0o000240, // 1002: NOP
+		0o000777, // 1004: BR 1004
+	})
+	if tm.Now() != 0 {
+		println("a machine that is reset has come", tm.Now(), "instructions far")
+		t.Fail()
+	}
+	tm.Run(2)
+	tm.Run(100)
+	if tm.Now() != 102 || tm.Count != 102 {
+		println("after 102 instructions the machine has come", tm.Now(), "far, and counted", tm.Count)
+		t.Fail()
+	}
+
+	// A program that writes to a device, which has the devices asked after
+	// the instruction that does: a device never sees the machine less far
+	// than it has seen it.
+	fresh([]uint16{
+		0o005237, lowAt, // 1000: INC @#164000
+		0o000775,        //        1004: BR 1000
+	})
+	tm.Run(1000)
+	if tm.Now() != 1000 || low.reg != 500 || low.back != 0 || low.seen < 990 {
+		println("the machine has come", tm.Now(), "far, went back", low.back, "times, and was seen at", low.seen)
+		t.Fail()
+	}
+
+	fresh([]uint16{0o000001}) // WAIT
+	tm.Run(10)
+	before := tm.Now()
+	for i := 0; i < 10; i++ {
+		tm.Run(10)
+	}
+	if tm.Count != 1 || tm.Now()-before < 10 {
+		println("waiting, the machine has come", tm.Now()-before, "far, and counted", tm.Count)
 		t.Fail()
 	}
 }

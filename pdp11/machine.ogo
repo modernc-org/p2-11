@@ -117,6 +117,7 @@ type Machine struct {
 	// Count is how many instructions have been executed since Reset.
 	Count uint32
 
+	now     uint32    // how far the machine has come, in instructions
 	psw     uint16
 	sp      [4]uint16 // the stack pointers, by mode; R[6] is the current one's
 	traps   uint16    // the traps requested and not yet taken, and attention
@@ -141,6 +142,7 @@ func (m *Machine) Reset() {
 	m.waiting = false
 	m.halted = false
 	m.Count = 0
+	m.now = 0
 	m.resetDevices()
 }
 
@@ -185,6 +187,17 @@ func (m *Machine) Attach(d Device, base, size, priority uint16) bool {
 		}
 	}
 	return true
+}
+
+// Now answers how far the machine has come, in instructions, as of when the
+// devices were last asked whether they want an interrupt, which they are
+// every pollEvery instructions at the least. A machine that waits for an
+// interrupt comes as far as one that does not, and faster. It is the time of
+// a device that has none of its own: what is so many instructions apart is
+// that however fast the machine is, which is what a program counts on that
+// was written for a machine and not for a clock.
+func (m *Machine) Now() uint32 {
+	return m.now
 }
 
 // PSW answers the processor status word.

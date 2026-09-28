@@ -27,13 +27,16 @@ func (m *Machine) Step() State {
 func (m *Machine) Run(n uint32) State {
 	state := Running
 	all := n
+	from := m.now
 	for n != 0 {
 		// Whatever else there is to do than the next instruction.
+		m.now = from + all - n
 		if !m.due() {
 			state = Faulted
 			break
 		}
 		if m.waiting {
+			from += pollEvery // time passes for a machine that waits
 			state = Waiting
 			break
 		}
@@ -76,6 +79,7 @@ func (m *Machine) Run(n uint32) State {
 		state = Waiting // the last of the n was a WAIT
 	}
 	m.Count += all - n
+	m.now = from + all - n
 	return state
 }
 
