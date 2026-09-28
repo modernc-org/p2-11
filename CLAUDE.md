@@ -10,7 +10,7 @@ p2-11 is a PDP-11 emulator for the Parallax Propeller 2 (P2), written in OctoGo.
 2. To find what OctoGo is missing or gets wrong. What was found is in `OCTOGO.md`.
 3. Fun.
 
-**Status, 2026-09-27.** The processor and the console exist, and a program on the board says what it is, sizes memory by trapping, and echoes what is typed with the receiver interrupting. The processor agrees with SimH's 11/40 on every one of 15,876 cases. There is no memory management, no clock and no disk yet, so no operating system boots. Keep this file in step as code lands, and delete what stops being true.
+**Status, 2026-09-27.** The processor and the console exist, and a program on the board says what it is, sizes memory by trapping, and echoes what is typed with the receiver interrupting. The processor agrees with SimH's 11/40 on every one of the 2380 cases in the repository and of the 15,685 of a sweep. There is no memory management, no clock and no disk yet, so no operating system boots. Keep this file in step as code lands, and delete what stops being true.
 
 ## OctoGo
 
@@ -37,13 +37,15 @@ What differs from Go and shapes this project:
 
 ### Which compiler
 
-`ogo` on PATH is installed from `../ogo` and lags it. On 2026-09-27 it was `v0.42.1-0.20260923071228-086cf7f98feb`, three days behind the tree, and the two differ in ways that matter here: see the last section of `OCTOGO.md`. The repository builds and passes its tests with both. Do not install over the user's `ogo`. To use the tree's compiler, build it somewhere of your own, which reads `../ogo` and changes nothing there:
+The repository needs the `ogo` of 2026-09-27, `v0.43.1-0.20260927203343-458488c32397`, or a later one. `ogo` on PATH is installed from `../ogo` by the user and the agent there, and may lag the tree or be ahead of what this file knows. Do not install over it. To try the tree's compiler, build it somewhere of your own, which reads `../ogo` and changes nothing there:
 
 ```sh
 (cd ../ogo && go build -o "$SCRATCH/ogo-head" .)
 ```
 
-A compiler that is given a program to find a fault with is run under a cap, as `../ogo`'s own sweeps are: `ulimit -v 4000000` and `timeout -s KILL`. The tree's compiler of 2026-09-26 allocates without end on a shape this project wrote (`OCTOGO.md`, 1), and an uncapped run took the machine's memory.
+Before a fault is reported, it is looked for with the tree's compiler: twice on 2026-09-27 what `ogo` on PATH did was already fixed there. And a compiler that is given a program to find a fault with is run under a cap, as `../ogo`'s own sweeps are, `ulimit -v 4000000` and `timeout -s KILL`: the tree's compiler of 2026-09-26 allocated without end on a shape this project wrote, and an uncapped run took the machine's memory.
+
+A build of this repository says nothing. One that warns has found something: `OCTOGO.md`, 1, is a wrong answer that came with a warning.
 
 ## Commands
 
@@ -56,11 +58,9 @@ ogo run                            # build, load, terminal at 230400 baud; Ctrl-
 ogo test ./...                     # every package, one board run each, about 20 s
 ogo test -run TestDemo ./dl11      # only the tests whose name matches
 ogo test -c ./pdp11                # build the tests only, no board needed
-scripts/twin.sh                    # the same tests under Go, on this machine, 1 s
+scripts/twin.sh                    # the tests of the packages under Go, on this machine, 1 s
 scripts/twin.sh -run Vectors ./pdp11
 ```
-
-With the compiler on PATH of 2026-09-27 the nine tests of `pdp11` do not fit one binary. Until it is newer they run in two goes: `ogo test -run 'Test[ACDIWRF]' ./pdp11` and `ogo test -run TestVectors ./pdp11`.
 
 `build` and `run` take `--unchecked` (no runtime checks), `--release` (reboot on a panic instead of halting the cog), `--clock 200MHz` (the default is 160 MHz, and 201 MHz is the most the compiler will ask for) and `--gostack N`. `test` takes `--clock`, `--gostack` and `-p port`.
 
@@ -86,7 +86,7 @@ Bytes written into that pipe before the `\x1d` reach the program as console inpu
 | `pdp11/vectors_test.ogo` | `scripts/vectors.py` | SimH, about two minutes |
 | `mac/demo.ogo`, `mac/bench.ogo` | `scripts/mac.py mac/demo.mac` | the MACRO-11 source beside it |
 
-`scripts/tools.sh` fetches and builds SimH and the macro11 assembler into `tools/`, which git ignores. Nothing needs them but these two scripts.
+`scripts/tools.sh` fetches and builds SimH and the macro11 assembler into `tools/`, which git ignores, each at the revision the repository's files were made with. Nothing needs them but these two scripts. Made again with the same tools and arguments, both files come out as they are.
 
 ## The board
 
@@ -120,9 +120,11 @@ Only the root knows the Propeller 2. The others are Go once they have a package 
 
 **Between cogs there is no lock and no channel.** Every variable two cogs share is written by one of them only: `dl11.Line` has a ring whose head the receiving cog writes and whose tail the machine's cog writes, and a count of bytes written by the program beside a count of bytes sent by the transmitting cog. A channel's rendezvous would stall the cog that reads the line.
 
-**A device** implements `pdp11.Device` and is attached at an address range and a priority. The machine reads and writes its registers through `Read` and `Write(a, v, mask)`, the mask saying which bits a byte write touches. It learns of interrupts by asking: `Request` answers the vector the device wants, `Granted` that it was taken. The devices are asked from the highest priority down, every `pollEvery` instructions and as soon as the program has touched a device or the status word. What a device's other cogs have done is brought into its registers when the machine next calls it.
+**A device** implements `pdp11.Device` and is attached at an address range and a priority. The machine reads and writes its registers through `Read` and `Write(a, v, mask)`, the mask saying which bits a byte write touches. It learns of interrupts by asking: `Request` answers the vector the device wants, `Granted` that it was taken. The devices are asked from the highest priority down, every `pollEvery` instructions and as soon as the program has touched a device or the status word, and again after every interrupt taken, until none is due that the status word lets in. What a device's other cogs have done is brought into its registers when the machine next calls it.
 
-**Traps** are bits in `Machine.traps`, the most urgent lowest. An access that fails requests one and reads as zero, there being nothing to unwind with, and the instruction asks `m.traps&aborts != 0` before it changes anything. `attention` is a bit among them that is no trap: whatever needs the instructions to stop following one another for a moment sets it, so that the loop in `Run` tests one word.
+**What is handed to another cog is not called back.** A device's `Reset` runs on the machine's cog and may not write what another cog owns. So the console's does not cancel a byte that is on its way: the transmitter is ready when the byte has left. There is one byte on its way at most, and a program that writes while the transmitter is busy overwrites it, as in a UART.
+
+**Traps** are bits in `Machine.traps`, the most urgent lowest. An access that fails requests one and reads as zero, there being nothing to unwind with, and what follows asks `m.traps&aborts != 0` before it does anything else: before the instruction changes anything, and before the next access of a sequence, a trap's two pushes among them. `attention` is a bit among the traps that is no trap: whatever needs the instructions to stop following one another for a moment sets it, so that the loop in `Run` tests one word.
 
 **The order of things inside an instruction is the 11/40's**, down to what is left behind when an access fails halfway, and that is what the vectors hold the code to. SimH's `pdp11_cpu.c` was the reference for behaviour; nothing of it is copied.
 
@@ -130,13 +132,16 @@ Only the root knows the Propeller 2. The others are Go once they have a package 
 
 ## Tests
 
-- **The vectors**, `pdp11/vector_test.ogo` over `pdp11/vectors_test.ogo`: 2380 cases of a machine before and after one or two steps, the after being what SimH's 11/40 made of it. They go through every instruction and addressing mode, the traps, the status word at its address, the stack limit, and 300 cases of whatever sixteen bits came up.
-- **By hand**: `pdp11/machine_test.ogo` for the bus, interrupts and the console's switches, with a device of its own; `dl11/dl11_test.ogo` for the line by itself and for the line as console of a machine that runs `mac/demo.mac`, whose output is compared with what it says in SimH.
-- **A sweep** is a larger table made elsewhere and run under the twin only. `scripts/vectors.py -n 12000 -o FILE` takes twelve minutes; put FILE in place of the twin's `pdp11/vectors_test.go`, under a package clause, in a twin kept with `scripts/twin.sh -k DIR`.
+- **The vectors**, `pdp11/vector_test.ogo` over `pdp11/vectors_test.ogo`: 2380 cases of a machine before and after one or two steps, the after being what SimH's 11/40 made of it, with whether it halted. They go through every instruction and addressing mode, the traps, the status word at its address, the stack limit, and 300 cases of whatever sixteen bits came up.
+- **By hand**: `pdp11/machine_test.ogo` for the bus, interrupts, the console's switches, what `Run` answers and that a program run ends where the same program stepped ends, with a device of its own; `dl11/dl11_test.ogo` for the line by itself and for the line as console of a machine that runs `mac/demo.mac`, whose output is compared with what it says in SimH.
+- **Between cogs**, `cogs_test.ogo` in the root: 20,000 bytes each way through the console with the cog of the other end running at once, and resets with a byte on its way. The tests of `dl11` are one cog taking the part of three in turn; this is the only place that asks whether a cog sees what another wrote, in the order it was written. It runs on the board only.
+- **A sweep** is a larger table made elsewhere and run under the twin only: `scripts/vectors.py -n 12000 -scale 2 -o FILE` takes a quarter of an hour; put FILE in place of `pdp11/vectors_test.go`, under a package clause, in a twin kept with `scripts/twin.sh -k DIR`, and run `GOARCH=386 go test ./pdp11` there.
 
-The twin is for a fast answer about the emulator's logic and for test sets too large for a board. It is not a verdict on what the board does; the board is. `ogo help test` states OctoGo's position.
+The twin is for a fast answer about the emulator's logic and for what a board has not the time for. It is not a verdict on what the board does; the board is. `ogo help test` states OctoGo's position. A `.go` file beside the `.ogo` files of a package goes into the twin as it is: `pdp11/host_test.go` has the vectors look at all of memory after every case, for a word written that no case names, where the board looks once at the end.
 
 A case the generator makes must not depend on what SimH has and the machine under test has not. SimH keeps its console and its clock whatever it is told, so the generator sets breakpoints on their registers and drops a case that hits one; and it clears all of memory before each case and lists every word that is not zero after it.
+
+A review by the Codex agent on 2026-09-27 found four faults the tests had not, all of them in what happens between instructions or between cogs and none in an instruction: a reset with a byte on its way, a trap's second push after its first had failed, an interrupt let in by the one before it, and what `Run` answers when its last instruction is a WAIT. Each has its test now. That is where to look next: combinations of events, not more instructions.
 
 ## What it costs, measured
 
@@ -144,13 +149,11 @@ P2-EC, `mac/bench.mac`: 303,004 instructions, of which a third each are `ADD R2,
 
 | Build | Instructions a second |
 | --- | --- |
-| checked, 160 MHz | 111,316 |
-| `--unchecked`, 160 MHz | 124,847 |
-| `--unchecked --clock 200MHz` | 156,026 |
+| checked, 160 MHz | 113,399 |
+| `--unchecked`, 160 MHz | 124,131 |
+| `--unchecked --clock 200MHz` | 155,068 |
 
-The two compilers agree to within 1%.
-
-In clocks at 160 MHz, `--unchecked`: a call and its return about 90 to 140; a field of the machine read and tested, 24; a `switch`, about 6 for every case it passes. A function with a branch in it is never inlined, and neither is one that names a constant. The measurements and their programs are in `OCTOGO.md`. Measure again after an `ogo` upgrade before relying on any of it.
+In clocks at 160 MHz, `--unchecked`: a call and its return about 90 to 150; a field of the machine read and tested, 30 to 40; a `switch`, about 5 for every case it passes. A function with a branch in it is never inlined, and neither is one that names a constant. The measurements and their programs are in `OCTOGO.md`. Measure again after an `ogo` upgrade before relying on any of it: the three compilers of 2026-09-23 to 2026-09-27 agree to within 2%.
 
 Guest RAM as `[N]uint16` makes a word access one `rdword` or `wrword`. A 248 KB array at package scope builds and runs; it is part of the binary image, which is then 263 KB to load.
 
@@ -202,7 +205,8 @@ The programs in `mac/` are the project's own.
 
 ## Working rules
 
-- An OctoGo gap or fault is a result, not an obstacle. Report it to the user with a minimal reproducer and measured numbers, write it into `OCTOGO.md`, and use the idiomatic workaround meanwhile. Check it against the tree's compiler first: twice on 2026-09-27 what the compiler on PATH did was already fixed there.
+- An OctoGo gap or fault is a result, not an obstacle. Report it to the user with a minimal reproducer and measured numbers, write it into `OCTOGO.md`, and use the idiomatic workaround meanwhile. When `ogo` has it fixed, take the workaround out and the entry with it.
+- What another agent's review says is reproduced before it is acted on, as a test that fails, and the test stays.
 - Code of general use, such as an SPI or SD driver and later video, is written as a package with no dependency on the emulator, so that it can move into OctoGo's standard library.
 - What a binary does is measured on the board before it is written down, with the `ogo version` and the clock it was measured at.
 - A test that fails is first suspected of being wrong itself. Of the differences from SimH met so far, one was the machine's, which counted an instruction it could not fetch as a step, and the rest were the test's: a generator that let a case reach SimH's console, a stale word of memory, an expectation miscounted.

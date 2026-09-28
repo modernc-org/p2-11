@@ -15,7 +15,7 @@ operating system from yet.
 
 ```
 $ ogo run
-303004 instructions in 2722 ms, 111316 a second
+303004 instructions in 2672 ms, 113399 a second
 
 PDP-11/40 on a Propeller 2, in OctoGo
 28K words of memory
@@ -40,18 +40,22 @@ receiver interrupting for every key.
 The processor is tested against the PDP-11/40 of
 [SimH](https://opensimh.org): 2380 cases of a machine before an instruction and
 after it, on the board and on the machine the program is written on. A sweep of
-15,876 more agrees as well.
+15,685 more agrees as well.
 
 ## Running it
 
-It needs a Propeller 2 board and `ogo`; it was written with a P2 Edge module
-and the OctoGo of late September 2026.
+It needs a Propeller 2 board and OctoGo. It was written with a P2 Edge module,
+P2-EC, and needs the `ogo` of 2026-09-27 or a later one:
+
+```sh
+go install modernc.org/ogo@458488c32397  # v0.43.1-0.20260927203343-458488c32397
+```
 
 ```sh
 ogo run                                  # build, load, and open a terminal
-ogo build --unchecked --clock 200MHz     # as fast as it goes: 156,026 a second
+ogo build --unchecked --clock 200MHz     # as fast as it goes: 155,068 a second
 ogo test ./...                           # the tests, on the board
-scripts/twin.sh                          # the same tests under Go, no board needed
+scripts/twin.sh                          # the packages' tests under Go, no board needed
 ```
 
 ## How it is put together
@@ -67,9 +71,9 @@ scripts/twin.sh                          # the same tests under Go, no board nee
 The three cogs share memory and no lock: every variable two of them share is
 written by one of them only.
 
-Only `main.ogo` knows about the Propeller 2. The packages are Go once they are
-given a package clause, which is how their tests also run where there is no
-board.
+Only the program at the root knows about the Propeller 2. The packages are Go
+once they are given a package clause, which is how their tests also run where
+there is no board.
 
 What writing it found out about OctoGo is in [OCTOGO.md](OCTOGO.md).
 
@@ -84,4 +88,5 @@ be fetched from where it is kept.
 BSD-3-Clause, see [LICENSE](LICENSE).
 
 SimH was the reference for what a PDP-11/40 does, and the programs in `mac/` are
-assembled with Richard Krehbiel's macro11. Neither is part of this repository.
+assembled with Richard Krehbiel's macro11. Neither is part of this repository;
+`scripts/tools.sh` fetches both, at the revisions that were used.

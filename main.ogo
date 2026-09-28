@@ -54,7 +54,7 @@ func run(at, start uint16, program []uint16) bool {
 			return true
 		case pdp11.Faulted:
 			printf("\r\nno vector or no stack for a trap, PC %06o SP %06o PSW %06o\r\n",
-			machine.R[7], machine.R[6], machine.PSW())
+				machine.R[7], machine.R[6], machine.PSW())
 			return false
 		}
 	}
