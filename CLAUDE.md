@@ -10,7 +10,7 @@ p2-11 is a PDP-11 emulator for the Parallax Propeller 2 (P2), written in OctoGo.
 2. To find what OctoGo is missing or gets wrong. What was found is in `OCTOGO.md`.
 3. Fun.
 
-**Status, 2026-09-28.** The processor, the console and the line clock exist. A program on the board says what it is, sizes memory by trapping, and echoes what is typed with the receiver interrupting; another waits for sixty interrupts of the clock, which take a second. The processor agrees with SimH's 11/40 on every one of the 2380 cases in the repository and of the 15,685 of a sweep. The SD card is read and written, and a file on it is found; the disk controller that is to use it does not exist. There is no memory management and no disk yet, so no operating system boots. Keep this file in step as code lands, and delete what stops being true.
+**Status, 2026-09-28.** The processor, the console and the line clock exist. A program on the board says what it is, sizes memory by trapping, and echoes what is typed with the receiver interrupting; another waits for sixty interrupts of the clock, which take a second. The processor agrees with SimH's 11/40 on every one of the 2380 cases in the repository and of the 15,685 of a sweep. The disk controller exists, with files on the SD card for its packs, and does on the board what SimH's does with a program of 35 steps. Nothing has been booted from it: there was no pack with a system on it on the day. There is no memory management. Keep this file in step as code lands, and delete what stops being true.
 
 ## OctoGo
 
@@ -55,7 +55,7 @@ ogo fmt -l -w .                    # format in place, list what changed
 ogo build                          # -> p2-11.binary and p2-11.p2asm
 ogo build --unchecked --clock 200MHz   # the fastest the compiler will make it
 ogo run                            # build, load, terminal at 230400 baud; Ctrl-] leaves
-ogo test ./...                     # every package, one board run each, about 40 s
+ogo test ./...                     # every package, one board run each, about a minute
 ogo test -run TestDemo ./dl11      # only the tests whose name matches
 ogo test -c ./pdp11                # build the tests only, no board needed
 scripts/twin.sh                    # the tests of the packages under Go, on this machine, 1 s
@@ -84,9 +84,10 @@ Bytes written into that pipe before the `\x1d` reach the program as console inpu
 | File | Made by | From |
 | --- | --- | --- |
 | `pdp11/vectors_test.ogo` | `scripts/vectors.py` | SimH, about two minutes |
-| `mac/demo.ogo`, `mac/bench.ogo`, `mac/ticks.ogo` | `scripts/mac.py mac/demo.mac` and so on | the MACRO-11 source beside it |
+| `mac/demo.ogo`, and so on for every `.mac` | `scripts/mac.py mac/demo.mac` | the MACRO-11 source beside it |
+| `mac/disk_table.ogo` | `scripts/rk.py` | SimH running `mac/disk.mac` with two packs the script makes, a second |
 
-`scripts/tools.sh` fetches and builds SimH and the macro11 assembler into `tools/`, which git ignores, each at the revision the repository's files were made with. Nothing needs them but these two scripts. Made again with the same tools and arguments, both files come out as they are.
+`scripts/tools.sh` fetches and builds SimH and the macro11 assembler into `tools/`, which git ignores, each at the revision the repository's files were made with. Nothing needs them but these three scripts. Made again with the same tools and arguments, the files come out as they are.
 
 ## The board
 
@@ -103,7 +104,9 @@ It is shared with the agent working in `../ogo`, and two loaders on one port cor
 | P60 | microSD chip select, flash clock |
 | P61 | microSD clock, flash chip select |
 
-The microSD slot has a card since 2026-09-28: an SDHC of 32 GB, 62,333,952 blocks, which the program is loaded with in place as it was without. The card agreed with the user is an SDHC of 4 to 32 GB, MBR with one FAT32 partition, holding image files with upper-case 8.3 names, each copied once onto the fresh filesystem so that it is contiguous. `TEST.DSK` on it is 4872 blocks of 512 bytes, each block filled with its own number as a little-endian 32-bit value. On this card the partition begins at block 8192 and `TEST.DSK` at block 38720. The tests write to blocks of `TEST.DSK` and to no others, and put back what was there.
+The microSD slot has a card since 2026-09-28: an SDHC of 32 GB, 62,333,952 blocks, which the program is loaded with in place as it was without. The card agreed with the user is an SDHC of 4 to 32 GB, MBR with one FAT32 partition, holding image files with upper-case 8.3 names, each copied once onto the fresh filesystem so that it is contiguous. `TEST.DSK` on it is 4872 blocks of 512 bytes, each block filled with its own number as a little-endian 32-bit value. On this card the partition begins at block 8192 and `TEST.DSK` at block 38720. The tests write to blocks of `TEST.DSK` and to no others, and put back what was there. The pack of drive 0 is the file `RK0.DSK`, and so on to `RK7.DSK`; there was none on the card on 2026-09-28.
+
+One load of about 130 on that day ended with the loader's `sendAddressSize: timeout`, and the twenty after it went well. Whether the card in the slot has to do with it is not known.
 
 ## Architecture
 
@@ -113,6 +116,7 @@ The microSD slot has a card since 2026-09-28: an SDHC of 32 GB, 62,333,952 block
 | `pdp11` | the machine: processor, memory, bus, traps and interrupts | no |
 | `dl11` | the DL11 serial line unit, which is the console | no |
 | `kw11` | the KW11-L line clock | no |
+| `rk11` | the RK11 disk controller and its RK05 drives | no |
 | `sd` | an SD card's blocks, read and written over SPI | yes |
 | `fat` | where on a disk a file of its FAT32 volume is | no |
 | `mac` | the PDP-11 programs the emulator carries, source and assembled | no |
@@ -121,13 +125,17 @@ Only the root and `sd` know the Propeller 2. The others are Go once they have a 
 
 **The card** is driven by the code, pin by pin, with no smart pin and no cog of its own. What is read is checked against the card's checksum and what is written is checked by the card, which is how a loop that read too early was found: the compiler had made it faster. The time between the card's clock falling and its bit being read is in the source since, `settle` in `sd/sd.ogo`, and what it was measured to have to be. `fat` does not read files: a file written once to an empty volume is one run of blocks, `fat` says where it begins and refuses one that is in pieces, and what uses the image reads and writes the card's blocks.
 
-**Four cogs.** `main` steps the machine with `Machine.Run`. `receive` does nothing but read the serial line, since nothing is buffered behind `p2.ReadByte` and a byte arriving while the cog is elsewhere is lost. `transmit` writes it. `line` counts the cycles of the power line for the clock, `hz` of them a second, which is 60. It times each from when its second began, so that what one is late by is not added to the next, and in microseconds, a program having no way to ask how many clocks a second has (`OCTOGO.md`, 4).
+**The disk** does a transfer on the cog of `Serve`, or on the machine's where no cog serves, which is how the tests of `rk11` run under the twin. A seek takes no time and ends when the controller has been looked at twice, the controller being ready before the drive as it is with an arm to move. A pack that cannot be read is the checksum error of the RK11, which a program tries again, and one that cannot be written its drive error. `mac/boot.mac` is the bootstrap, the project's own: it leaves in the registers what the bootstraps of a PDP-11 leave there for what a pack begins with.
 
-**Between cogs there is no lock and no channel.** Every variable two cogs share is written by one of them only: `dl11.Line` has a ring whose head the receiving cog writes and whose tail the machine's cog writes, and a count of bytes written by the program beside a count of bytes sent by the transmitting cog; `kw11.Clock` has a count of cycles the counting cog writes beside the count of them the register knows of. A channel's rendezvous would stall the cog that reads the line.
+**Five cogs.** `main` steps the machine with `Machine.Run`. `receive` does nothing but read the serial line, since nothing is buffered behind `p2.ReadByte` and a byte arriving while the cog is elsewhere is lost. `transmit` writes it. `line` counts the cycles of the power line for the clock, `hz` of them a second, which is 60. It times each from when its second began, so that what one is late by is not added to the next, and in microseconds, a program having no way to ask how many clocks a second has (`OCTOGO.md`, 4). `turn` opens the card, puts the packs it finds in their drives, and then moves blocks between the card and memory as the controller orders.
+
+**Between cogs there is no lock and no channel.** Every variable two cogs share is written by one of them only: `dl11.Line` has a ring whose head the receiving cog writes and whose tail the machine's cog writes, and a count of bytes written by the program beside a count of bytes sent by the transmitting cog; `kw11.Clock` has a count of cycles the counting cog writes beside the count of them the register knows of; `rk11.Controller` has an order with its number, which the machine's cog writes, and a report with the number of the order it is of, which the cog of the disk writes. Memory is the exception, as it is on a bus that a device can take: the cog of the disk reads and writes words of it through `Machine.Fetch` and `Machine.Store`, while the program runs. A channel's rendezvous would stall the cog that reads the line.
 
 **A device** implements `pdp11.Device` and is attached at an address range and a priority. The machine reads and writes its registers through `Read` and `Write(a, v, mask)`, the mask saying which bits a byte write touches. It learns of interrupts by asking: `Request` answers the vector the device wants, `Granted` that it was taken. The devices are asked from the highest priority down, every `pollEvery` instructions and as soon as the program has touched a device or the status word, and again after every interrupt taken, until none is due that the status word lets in. What a device's other cogs have done is brought into its registers when the machine next calls it.
 
-**What is handed to another cog is not called back.** A device's `Reset` runs on the machine's cog and may not write what another cog owns. So the console's does not cancel a byte that is on its way: the transmitter is ready when the byte has left. There is one byte on its way at most, and a program that writes while the transmitter is busy overwrites it, as in a UART.
+**What is handed to another cog is not called back.** A device's `Reset` runs on the machine's cog and may not write what another cog owns. So the console's does not cancel a byte that is on its way: the transmitter is ready when the byte has left. There is one byte on its way at most, and a program that writes while the transmitter is busy overwrites it, as in a UART. The disk's does not leave a transfer to go on into memory that is the program's again: it says which order is abandoned, which the other cog looks at between two blocks, and waits.
+
+**A pin is the cog's that drives it.** What the cogs drive is ORed, so a pin one cog holds high is not another's to pull low. The card is opened by the cog that uses it, `turn`, and a test that uses the card on its own cog closes it, which lets go of the pins.
 
 **Traps** are bits in `Machine.traps`, the most urgent lowest. An access that fails requests one and reads as zero, there being nothing to unwind with, and what follows asks `m.traps&aborts != 0` before it does anything else: before the instruction changes anything, and before the next access of a sequence, a trap's two pushes among them. `attention` is a bit among the traps that is no trap: whatever needs the instructions to stop following one another for a moment sets it, so that the loop in `Run` tests one word.
 
@@ -139,11 +147,14 @@ Only the root and `sd` know the Propeller 2. The others are Go once they have a 
 
 - **The vectors**, `pdp11/vector_test.ogo` over `pdp11/vectors_test.ogo`: 2380 cases of a machine before and after one or two steps, the after being what SimH's 11/40 made of it, with whether it halted. They go through every instruction and addressing mode, the traps, the status word at its address, the stack limit, and 300 cases of whatever sixteen bits came up.
 - **By hand**: `pdp11/machine_test.ogo` for the bus, interrupts, the console's switches, what `Run` answers and that a program run ends where the same program stepped ends, with a device of its own; `dl11/dl11_test.ogo` for the line by itself and for the line as console of a machine that runs `mac/demo.mac`, whose output is compared with what it says in SimH; `kw11/kw11_test.ogo` for the clock by itself and for the clock on a machine, which runs `mac/ticks.mac` to where it ends in SimH, and keeps the cycles that pass while the processor's priority holds them back for one interrupt, as SimH does.
-- **The card**: `fat/fat_test.ogo` finds files on a disk that is made up block by block as it is read, with a directory in two clusters that are not neighbours and files in one piece and in several, under the twin and on the board. `sd/sd_test.ogo` reads the card in the slot and writes nothing. `disk_test.ogo` in the root reads all of `TEST.DSK` and compares it, and writes seventeen blocks of it, reads them and puts back what they had. The last two run on the board only, and pass on a board with no card, or no such file, saying that nothing was tested.
+- **The card**: `fat/fat_test.ogo` finds files on a disk that is made up block by block as it is read, with a directory in two clusters that are not neighbours and files in one piece and in several, under the twin and on the board. `sd/sd_test.ogo` reads the card in the slot and writes nothing. `card_test.ogo` in the root reads all of `TEST.DSK` and compares it, and writes seventeen blocks of it, reads them and puts back what they had. The last two run on the board only, and pass on a board with no card, or no such file, saying that nothing was tested.
+- **The disk**: `mac/disk.mac` has the controller do 35 things, among them every function, every error a program can cause, interrupts, and registers written a byte at a time, and writes the registers after each into a table. `scripts/rk.py` has SimH make that table, and `rk11/rk11_test.ogo` compares: with the controller doing the transfers itself, and with the test as the cog of the disk after every 1, 7, 49 and 343 instructions. What the program cannot ask is tested by hand: a pack that fails, a drive that is busy, a pack taken out, and the bootstrap, which leaves in SimH what it leaves here. `disk_test.ogo` in the root runs the program with the cog of the disk and `TEST.DSK` on the card, on the board only.
 - **Between cogs**, `cogs_test.ogo` in the root: 20,000 bytes each way through the console with the cog of the other end running at once, and resets with a byte on its way; and the clock with the program's own cog counting, by which `mac/ticks.mac` is to take a second. The tests of `dl11` are one cog taking the part of three in turn; this is the only place that asks whether a cog sees what another wrote, in the order it was written. It runs on the board only.
 - **A sweep** is a larger table made elsewhere and run under the twin only: `scripts/vectors.py -n 12000 -scale 2 -o FILE` takes a quarter of an hour; put FILE in place of `pdp11/vectors_test.go`, under a package clause, in a twin kept with `scripts/twin.sh -k DIR`, and run `GOARCH=386 go test ./pdp11` there.
 
 The twin is for a fast answer about the emulator's logic and for what a board has not the time for. It is not a verdict on what the board does; the board is. `ogo help test` states OctoGo's position. A `.go` file beside the `.ogo` files of a package goes into the twin as it is: `pdp11/host_test.go` has the vectors look at all of memory after every case, for a word written that no case names, where the board looks once at the end.
+
+A program that is compared with SimH must not depend on how long a drive takes, which is SimH's guess and not this machine's: it waits for what it wants to see. SimH's sector counter is a random number, and is left out of the table.
 
 A case the generator makes must not depend on what SimH has and the machine under test has not. SimH keeps its console and its clock whatever it is told, so the generator sets breakpoints on their registers and drops a case that hits one; and it clears all of memory before each case and lists every word that is not zero after it.
 
@@ -155,11 +166,11 @@ P2-EC, `mac/bench.mac`: 303,004 instructions, of which a third each are `ADD R2,
 
 | Build | Instructions a second |
 | --- | --- |
-| checked, 160 MHz | 119,811 |
-| `--unchecked`, 160 MHz | 133,071 |
-| `--unchecked --clock 200MHz` | 166,302 |
+| checked, 160 MHz | 116,629 |
+| `--unchecked`, 160 MHz | 133,364 |
+| `--unchecked --clock 200MHz` | 166,760 |
 
-That is with the console and the clock attached. A device more to ask every `pollEvery` instructions cost 0.4% of the checked build and 1% of the others: with the console alone they ran 120,287, 134,369 and 167,962.
+That is with the console, the clock and the disk on the bus. With the console alone the three ran 120,287, 134,369 and 167,962, and with the console and the clock 119,811, 133,071 and 166,302. A device more to ask every `pollEvery` instructions costs about 1%, and so does where the build has put things: with the disk in the program and not on the bus the first two ran 117,762 and 131,912.
 
 Sixty interrupts of the clock take 985 to 993 ms from when the program enables them, the first cycle being under way by then.
 
@@ -199,7 +210,7 @@ What there is of it:
 | DL11 console | done |
 | KW11-L line clock | done |
 | the SD card, and a file's place on its FAT32 volume | done |
-| RK11 disk controller, over an image on the card | not started |
+| RK11 disk controller, with files on the card for packs | done; nothing has been booted from it |
 | KT11-D memory management, 248 KB | not started |
 | FIS, the floating point processor | not planned: their instructions trap as on a machine without them |
 
@@ -247,5 +258,6 @@ Code taken from elsewhere keeps its own notice, and is recorded before it is com
 
 ## Open decisions
 
-- Whether the program is built `--unchecked` by those who run it. It is 11% faster.
+- Whether the program is built `--unchecked` by those who run it. It is 14% faster.
+- Which RT-11 to begin with. Advised on 2026-09-28: RT-11 V4 on RK05 from SimH's software kits, `rt11swre.tar.Z`, whose `rtv4_rk.dsk` SimH boots with `att rk0` and `boot rk0`. SimH's document says it is licensed "for non-commercial use ONLY ON THIS SIMULATOR". The user looks for it, and it goes to `guest/`.
 - A lock shared with `../ogo` around board access, offered and not yet answered.

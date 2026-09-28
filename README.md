@@ -10,13 +10,13 @@ PDP-11.
 
 ## Status
 
-Early. The processor, the console and the line clock are there. The SD card is
-read and written, and nothing boots from it yet: there is no disk controller.
+Early. The processor, the console, the line clock and the disk are there, and
+nothing has been booted from the disk yet.
 
 ```
 $ ogo run
-303004 instructions in 2529 ms, 119811 a second
-60 cycles of the line clock in 985 ms
+303004 instructions in 2598 ms, 116629 a second
+60 cycles of the line clock in 992 ms
 
 PDP-11/40 on a Propeller 2, in OctoGo
 28K words of memory
@@ -31,6 +31,9 @@ reading upwards until the bus times out and the processor traps, prints that in
 decimal with the extended instruction set's DIV, and then waits, the console's
 receiver interrupting for every key.
 
+That is what the machine does with no disk. With an SD card in the slot that
+has a file `RK0.DSK`, it begins with what is on that pack.
+
 | | |
 | --- | --- |
 | KD11-A processor with the KE11-E extended instruction set | there |
@@ -38,13 +41,14 @@ receiver interrupting for every key.
 | DL11 console, on the serial line the program is loaded through | there |
 | KW11-L line clock | there |
 | the SD card's blocks, and where a file of its FAT32 volume is | there |
-| RK11 disk, from an image on the SD card | not yet |
+| RK11 disk with RK05 drives, a file on the SD card for a pack | there |
 | KT11-D memory management | not yet |
 
 The processor is tested against the PDP-11/40 of
 [SimH](https://opensimh.org): 2380 cases of a machine before an instruction and
 after it, on the board and on the machine the program is written on. A sweep of
-15,685 more agrees as well.
+15,685 more agrees as well. The disk is tested against SimH's too, with a
+program of 35 steps, [mac/disk.mac](mac/disk.mac).
 
 ## Running it
 
@@ -57,7 +61,7 @@ go install modernc.org/ogo@ed3022eabb19  # v0.43.1-0.20260928095216-ed3022eabb19
 
 ```sh
 ogo run                                  # build, load, and open a terminal
-ogo build --unchecked --clock 200MHz     # as fast as it goes: 166,302 a second
+ogo build --unchecked --clock 200MHz     # as fast as it goes: 166,760 a second
 ogo test ./...                           # the tests, on the board
 scripts/twin.sh                          # the packages' tests under Go, no board needed
 ```
@@ -66,10 +70,11 @@ scripts/twin.sh                          # the packages' tests under Go, no boar
 
 | | |
 | --- | --- |
-| [main.ogo](main.ogo) | the program: four cogs, one stepping the machine, one reading the serial line, one writing it, one counting the cycles of the line clock |
+| [main.ogo](main.ogo), [disk.ogo](disk.ogo) | the program: five cogs, one stepping the machine, one reading the serial line, one writing it, one counting the cycles of the line clock, one moving blocks between the card and memory |
 | [pdp11](pdp11) | the machine: processor, memory, bus, traps and interrupts |
 | [dl11](dl11) | the console |
 | [kw11](kw11) | the line clock |
+| [rk11](rk11) | the disk controller and its drives |
 | [sd](sd) | an SD card's blocks, read and written over SPI |
 | [fat](fat) | where on a disk a file of its FAT32 volume is |
 | [mac](mac) | the PDP-11 programs it carries, in MACRO-11 and assembled |
@@ -83,6 +88,18 @@ packages are Go once they are given a package clause, which is how their tests
 also run where there is no board. `sd` and `fat` know nothing about the PDP-11.
 
 What writing it found out about OctoGo is in [OCTOGO.md](OCTOGO.md).
+
+## A disk
+
+A pack is a file on the card: `RK0.DSK` for drive 0, and so on to `RK7.DSK`.
+The card is an SD card of any size with a FAT32 volume, and the file is an
+image of an RK05 pack, 2,494,464 bytes, copied to a card that has not had a
+file deleted, so that it is in one piece.
+
+```sh
+truncate -s 2494464 RK0.DSK              # an image that is shorter is made a whole pack
+cp RK0.DSK /media/card/ && sync
+```
 
 ## Software for it
 
