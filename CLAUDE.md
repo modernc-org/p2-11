@@ -62,6 +62,8 @@ scripts/twin.sh                    # the tests of the packages under Go, on this
 scripts/twin.sh -run Vectors ./pdp11
 scripts/twin.sh -v -run RT11 ./rk11 # the talk with RT-11, if guest/RK0.DSK and SimH are there
 scripts/talk.py                    # the same talk on the board and in SimH, half a minute
+scripts/card.py put guest/RK0.DSK RK0.DSK   # the pack onto the card through the board, two minutes
+scripts/card.py sum RK0.DSK guest/RK0.DSK   # which blocks of the pack on the card differ from the file, 15 s
 ```
 
 `build` and `run` take `--unchecked` (no runtime checks), `--release` (reboot on a panic instead of halting the cog), `--clock 200MHz` (the default is 160 MHz, and 201 MHz is the most the compiler will ask for) and `--gostack N`. `test` takes `--clock`, `--gostack` and `-p port`.
@@ -87,7 +89,7 @@ Bytes written into that pipe before the `\x1d` reach the program as console inpu
 
 | File | Made by | From |
 | --- | --- | --- |
-| `pdp11/vectors_test.ogo` | `scripts/vectors.py` | SimH, about two minutes |
+| `pdp11/vectors_test.ogo` | `scripts/vectors.py` | SimH, one to two minutes |
 | `mac/demo.ogo`, and so on for every `.mac` | `scripts/mac.py mac/demo.mac` | the MACRO-11 source beside it |
 | `mac/disk_table.ogo` | `scripts/rk.py` | SimH running `mac/disk.mac` with two packs the script makes, a second |
 
@@ -108,7 +110,7 @@ It is shared with the agent working in `../ogo`, and two loaders on one port cor
 | P60 | microSD chip select, flash clock |
 | P61 | microSD clock, flash chip select |
 
-The microSD slot has a card since 2026-09-28: an SDHC of 32 GB, 62,333,952 blocks, which the program is loaded with in place as it was without. The card agreed with the user is an SDHC of 4 to 32 GB, MBR with one FAT32 partition, holding image files with upper-case 8.3 names, each copied once onto the fresh filesystem so that it is contiguous. `TEST.DSK` on it is 4872 blocks of 512 bytes, each block filled with its own number as a little-endian 32-bit value. On this card the partition begins at block 8192 and `TEST.DSK` at block 38720. The tests write to blocks of `TEST.DSK` and to no others, and put back what was there. The pack of drive 0 is the file `RK0.DSK`, and so on to `RK7.DSK`. `RK0.DSK` is on the card since 2026-09-28, from block 43616: RT-11 V4, as `guest/RK0.DSK` has it but for what the talks have written, which is what SimH writes to its copy.
+The microSD slot has a card since 2026-09-28: an SDHC of 32 GB, 62,333,952 blocks, which the program is loaded with in place as it was without. The card agreed with the user is an SDHC of 4 to 32 GB, MBR with one FAT32 partition, holding image files with upper-case 8.3 names, each copied once onto the fresh filesystem so that it is contiguous. `TEST.DSK` on it is 4872 blocks of 512 bytes, each block filled with its own number as a little-endian 32-bit value. On this card the partition begins at block 8192 and `TEST.DSK` at block 38720. The tests write to blocks of `TEST.DSK` and to no others, and put back what was there. The pack of drive 0 is the file `RK0.DSK`, and so on to `RK7.DSK`. `RK0.DSK` is on the card since 2026-09-28, from block 43616: RT-11 V4, as `guest/RK0.DSK` has it but for what the talks have written, which is what SimH writes to its copy. A file goes onto the card without the card coming out: `scripts/card.py put guest/RK0.DSK RK0.DSK`, which is how the pack was put back on 2026-09-28 after an editor's output file, left on it by hand, had the talk on the board disagree with SimH; "A new machine" tells of it.
 
 One load of about 130 on that day ended with the loader's `sendAddressSize: timeout`, and the twenty after it went well. Whether the card in the slot has to do with it is not known.
 
@@ -143,7 +145,7 @@ ogo test ./...                     # the card in the slot
 scripts/talk.py                    # RT-11 on the board and in SimH
 ```
 
-What was left for where the card is: `ogo` v0.44.0 was measured without the card, so the tests of the card and of the disk with it, the talk on the board, and what a block of the card takes have not run with it. And `sd` still keeps the sixteen bytes it reads a card's size from in the `Card`, which it did because an error could not be returned that came of a call given a local buffer. It can since `ogo` c888892, and the bytes can be a local of `size` again, once there is a card to test that with.
+On the new machine, 2026-09-28, with go1.27.0 and `ogo` v0.44.0, all of that said `ok` but `scripts/talk.py`, and the three generators made the repository's files again as they are. The tests read `TEST.DSK` in 9572 ms, a block of the card in 1605 µs, and wrote one in 2464 µs, as with the compiler of the day before. The talk found the pack on the card changed: its last free area, one entry of 1533 blocks in `guest/RK0.DSK`, is on the card two entries of 766 and 767, the first named `DEMOED.TXT` and without a date, which is what an editor's output file leaves that was entered and never closed. The talk does no such thing, and SimH begun with a pack split the same way says what the board says, byte for byte. `scripts/card.py` was written that evening to put a file onto the card through the board, the card staying in its slot, and put `guest/RK0.DSK` there again; the talk then said what SimH says, 1558 bytes in 36 s. The sixteen bytes `sd` reads a card's size from are a local of `size` again since the same evening, which they could not be before `ogo` c888892, an error not being returnable from a call given a local buffer; the card's tests pass so.
 
 ## Architecture
 
@@ -155,12 +157,15 @@ What was left for where the card is: `ogo` v0.44.0 was measured without the card
 | `kw11` | the KW11-L line clock | no |
 | `rk11` | the RK11 disk controller and its RK05 drives | no |
 | `sd` | an SD card's blocks, read and written over SPI | yes |
+| `card` | a second program: puts a file of this machine into a file on the card and sums one there, over the serial line, for `scripts/card.py` | yes |
 | `fat` | where on a disk a file of its FAT32 volume is | no |
 | `mac` | the PDP-11 programs the emulator carries, source and assembled | no |
 
-Only the root and `sd` know the Propeller 2. The others are Go once they have a package clause, which is what `scripts/twin.sh` relies on. `sd` and `fat` know nothing of the emulator, and are written to be of use without it.
+Only the root, `card` and `sd` know the Propeller 2. The others are Go once they have a package clause, which is what `scripts/twin.sh` relies on. `sd` and `fat` know nothing of the emulator, and are written to be of use without it.
 
 **The card** is driven by the code, pin by pin, with no smart pin and no cog of its own. What is read is checked against the card's checksum and what is written is checked by the card, which is how a loop that read too early was found: the compiler had made it faster. The time between the card's clock falling and its bit being read is in the source since, `settle` in `sd/sd.ogo`, and what it was measured to have to be. `fat` does not read files: a file written once to an empty volume is one run of blocks, `fat` says where it begins and refuses one that is in pieces, and what uses the image reads and writes the card's blocks.
+
+**A file goes onto the card** through the board: `card/` is a program of its own, which `scripts/card.py` builds and loads in place of the emulator and speaks to in lines through the loader's terminal. A block is its 512 bytes after a header that sums them, escaped where a byte is one the terminal would take for itself, and four blocks are on their way at once; a cog reads the line into a ring and `main` writes the card from it, says of each block whether it arrived as summed and is written, and afterwards sums every block of the file back for the script to compare. It cannot make a file: the file must be on the card already, and `fat` says where it is.
 
 **The disk** does a transfer on the cog of `Serve`, or on the machine's where no cog serves, which is how the tests of `rk11` run under the twin. A seek takes no time and ends when the controller has been looked at twice, the controller being ready before the drive as it is with an arm to move. A pack that cannot be read is the checksum error of the RK11, which a program tries again, and one that cannot be written its drive error. `mac/boot.mac` is the bootstrap, the project's own: it leaves in the registers what the bootstraps of a PDP-11 leave there for what a pack begins with.
 
@@ -189,7 +194,7 @@ Only the root and `sd` know the Propeller 2. The others are Go once they have a 
 - **The card**: `fat/fat_test.ogo` finds files on a disk that is made up block by block as it is read, with a directory in two clusters that are not neighbours and files in one piece and in several, under the twin and on the board. `sd/sd_test.ogo` reads the card in the slot and writes nothing. `card_test.ogo` in the root reads all of `TEST.DSK` and compares it, and writes seventeen blocks of it, reads them and puts back what they had. The last two run on the board only, and pass on a board with no card, or no such file, saying that nothing was tested.
 - **The disk**: `mac/disk.mac` has the controller do 35 things, among them every function, every error a program can cause, interrupts, and registers written a byte at a time, and writes the registers after each into a table. `scripts/rk.py` has SimH make that table, and `rk11/rk11_test.ogo` compares: with the controller doing the transfers itself, and with the test as the cog of the disk after every 1, 7, 49 and 343 instructions. What the program cannot ask is tested by hand: a pack that fails, a drive that is busy, a pack taken out, and the bootstrap, which leaves in SimH what it leaves here. `disk_test.ogo` in the root runs the program with the cog of the disk and `TEST.DSK` on the card, on the board only.
 - **A system**: `rk11/host_test.go` is Go, for the twin only, and is skipped where `guest/RK0.DSK` or SimH is not. It has the machine begin with the pack and holds a talk with RT-11 in which a file is copied, compared and deleted, has SimH do the same, and compares what the two consoles said and what the two packs then hold. Each command waits for the prompt after the one before it, so that nothing is typed into what the system says. It found the console's pace, which no test of the project's own programs had: they wait for a character and have done with it before the next.
-- **A system on the board**: `scripts/talk.py` holds that talk with the board, through the loader's terminal, and with SimH, and compares what the two have said. On 2026-09-28 they said the same 1558 bytes, in the three builds, and the pack on the card was then what SimH's copy was: a program made for the day read the file from the card and summed it, and the sums were those of the copy. A talk leaves the pack so that the next one says the same.
+- **A system on the board**: `scripts/talk.py` holds that talk with the board, through the loader's terminal, and with SimH, and compares what the two have said. On 2026-09-28 they said the same 1558 bytes, in the three builds, and the pack on the card was then what SimH's copy was: a program made for the day read the file from the card and summed it, and the sums were those of the copy. A talk leaves the pack so that the next one says the same. What the pack on the card holds is compared with the file by `scripts/card.py sum RK0.DSK guest/RK0.DSK`, which names the blocks that differ: after a talk, blocks 8 to 9 and 38 to 45, the second directory segment and the swap area, and 1423 to 1458, where the copied file was.
 - **Between cogs**, `cogs_test.ogo` in the root: 20,000 bytes each way through the console with the cog of the other end running at once, and resets with a byte on its way; and the clock with the program's own cog counting, by which `mac/ticks.mac` is to take a second. The tests of `dl11` are one cog taking the part of three in turn; this is the only place that asks whether a cog sees what another wrote, in the order it was written. It runs on the board only.
 - **A sweep** is a larger table made elsewhere and run under the twin only: `scripts/vectors.py -n 12000 -scale 2 -o FILE` takes a quarter of an hour; put FILE in place of `pdp11/vectors_test.go`, under a package clause, in a twin kept with `scripts/twin.sh -k DIR`, and run `GOARCH=386 go test ./pdp11` there.
 
@@ -217,6 +222,8 @@ Sixty interrupts of the clock take 985 to 999 ms from when the program enables t
 
 The talk with RT-11, from the loader's first byte to the last prompt, of which six seconds are the loader, the benchmark and the clock's second: 36 s checked, 32 s `--unchecked`, and 26 s `--unchecked --clock 200MHz`.
 
+A pack onto the card with `scripts/card.py`: 4872 blocks in 113 s, which is the rate of the line at 230400 baud with a block's header and its escaped bytes, and 15 s more for the build, the load and the reading back. To sum the pack on the card against a file takes 15 s in all.
+
 A block of the card, with its command and its checksum:
 
 | Build | Microseconds to read a block |
@@ -225,7 +232,7 @@ A block of the card, with its command and its checksum:
 | `--unchecked`, 160 MHz | 1239 |
 | `--unchecked --clock 200MHz` | 1050 |
 
-To write one takes 2.5 to 5 ms, most of which is the card's. All of `TEST.DSK` is read and compared in 9.6 s by the tests, which are built checked. With `settle` at 0, 1 or 2 the first thing of any length the card sends fails its checksum, at 160 MHz and at 200 MHz alike, and with 3 to 6 all of 500 blocks are read; it is 8. These were measured with `ogo` 3875205f89d4, of the day before v0.44.0, as was the talk with RT-11: the card was not there when v0.44.0 was.
+To write one takes 2.5 to 5 ms, most of which is the card's. All of `TEST.DSK` is read and compared in 9.6 s by the tests, which are built checked. With `settle` at 0, 1 or 2 the first thing of any length the card sends fails its checksum, at 160 MHz and at 200 MHz alike, and with 3 to 6 all of 500 blocks are read; it is 8. The checked build's block was measured again with v0.44.0 on 2026-09-28, 1605 µs; the other two were measured with `ogo` 3875205f89d4, of the day before v0.44.0, as was the talk with RT-11: the card was not there when v0.44.0 was.
 
 In clocks at 160 MHz, `--unchecked`: a call and its return 75 to 115; a field of the machine read and tested, 30; a `switch`, about 5 for every case it passes. A function with a branch in it is never inlined. The measurements and their programs are in `OCTOGO.md`. Measure again after an `ogo` upgrade before relying on any of it: the compiler of 2026-09-28 made the emulator 6 to 8% faster by making a named constant its value, where the three before it had agreed to within 2%.
 
