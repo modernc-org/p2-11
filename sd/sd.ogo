@@ -104,9 +104,8 @@ const (
 type Card struct {
 	clk, cs, mosi, miso int
 
-	slow   bool     // the clock is what a card takes while it is set up
-	shift  uint32   // a block's number, shifted left by this, is its address
-	csd    [16]byte // what the card says of itself
+	slow   bool   // the clock is what a card takes while it is set up
+	shift  uint32 // a block's number, shifted left by this, is its address
 	blocks uint32
 }
 
@@ -262,10 +261,10 @@ func (c *Card) size() error {
 	if c.command(sendCSD, 0) != 0 {
 		return &ErrRefused
 	}
-	if err := c.receive(c.csd[:]); err != nil {
+	var csd [16]byte // what the card says of itself
+	if err := c.receive(csd[:]); err != nil {
 		return err
 	}
-	csd := &c.csd
 	switch csd[0] >> 6 {
 	case 0:
 		size := uint32(csd[6]&0x03)<<10 | uint32(csd[7])<<2 | uint32(csd[8])>>6
