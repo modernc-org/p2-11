@@ -13,8 +13,9 @@ memory the build has put things.
 An entry is removed when `ogo` no longer shows it and the emulator no longer
 works around it. What was found and is closed is at the end, by name.
 
-The two that are open are one: what the backend makes of the C it is given. A
-call is dear, and what is not inlined is called.
+Of the five that are open, the first two are one: what the backend makes of the
+C it is given. A call is dear, and what is not inlined is called. The others
+are small, and none was measured on a board, there being nothing to measure.
 
 ## 1. A function with a branch in it is called, and a call is dear
 
@@ -89,7 +90,92 @@ that has a branch in it, which by 1 is not inlined; and a function that calls
 one is in turn too large to be inlined itself.
 
 The emulator as it is now loses less to them, its checks being few a call:
-120,287 instructions a second checked and 134,369 unchecked.
+119,811 instructions a second checked and 133,071 unchecked.
+
+## 3. `ogo fmt` takes the indentation from the second line of an expression
+
+```go
+func f(a, b, c int) bool {
+	return a < b &&
+		b < c
+}
+```
+
+gofmt leaves that as it is. `ogo fmt` puts `b < c` under `return`, and does
+the same to an operand of `+` on a line of its own and to the second line of
+an `if`'s condition. What is built is the same; what is read is not.
+
+**Meanwhile:** the emulator has no expression of more than a line. The one it
+would have had, in `attach` of `main.ogo`, is an `if` and a `return`.
+
+## 4. A program cannot ask how fast its clock is
+
+The frequency is chosen where the program is built, with `--clock`, and `p2`
+has no name for it. What `p2` counts in clocks is of use to a program that
+knows how many of them a second has: `p2.GetCt`, `p2.WaitUntil` and
+`p2.WaitCycles`, and the periods a smart pin is given with `p2.WritePinX`, a
+bit of a serial line among them.
+
+```go
+import "p2"
+
+func main() {
+	next := p2.GetCt()
+	for {
+		next += 160000000 / 60 // at 160 MHz, and at no other frequency
+		p2.WaitUntil(next)
+		p2.PinToggle(56)
+	}
+}
+```
+
+**Meanwhile:** the cog that counts the cycles of the line clock times them in
+microseconds, with `p2.GetUs` and `p2.WaitUs`, which the backend's library
+makes of the frequency. That is good to a microsecond where the frequency is
+a whole number of MHz, and a cycle of a sixtieth of a second wants no better.
+`sd` waits a number of clocks for the card's bit, and the number is the one
+for the fastest clock there is.
+
+## 5. An error cannot be returned that comes of a call given a local buffer
+
+```go
+type failure struct {
+	what string
+}
+
+func (f *failure) Error() string {
+	return f.what
+}
+
+var errEmpty = failure{"nothing to fill"}
+
+func fill(p []byte) error {
+	if len(p) == 0 {
+		return &errEmpty
+	}
+	p[0] = 1
+	return nil
+}
+
+func first() (byte, error) {
+	var buf [16]byte
+	if err := fill(buf[:]); err != nil {
+		return 0, err
+	}
+	return buf[0], nil
+}
+```
+
+```
+main.ogo:22:13: cannot return local err, which holds a pointer into local buf: its storage does not outlive the function; declare buf at package scope
+```
+
+What `fill` returns is the address of a variable of the package or nothing,
+and never anything of `p`. It is the way a Go program reads into a buffer of
+its own and passes on what went wrong.
+
+**Meanwhile:** the sixteen bytes `sd` reads a card's size from are a field of
+the `Card`, not a local of the method that reads them.
 
 ## Found here and closed
 

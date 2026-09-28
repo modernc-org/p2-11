@@ -10,20 +10,23 @@ PDP-11.
 
 ## Status
 
-Early. The processor and the console are there, and nothing to boot an
-operating system from yet.
+Early. The processor, the console and the line clock are there. The SD card is
+read and written, and nothing boots from it yet: there is no disk controller.
 
 ```
 $ ogo run
-303004 instructions in 2519 ms, 120287 a second
+303004 instructions in 2529 ms, 119811 a second
+60 cycles of the line clock in 985 ms
 
 PDP-11/40 on a Propeller 2, in OctoGo
 28K words of memory
 Type; control-D halts.
 ```
 
-The first line is the emulator timing itself on a loop. The rest is a PDP-11
-program, [mac/demo.mac](mac/demo.mac): it finds out how much memory there is by
+The first line is the emulator timing itself on a loop, and the second how long
+a PDP-11 program, [mac/ticks.mac](mac/ticks.mac), waited for sixty interrupts
+of the clock, the first of which was on its way when it began. The rest is
+[mac/demo.mac](mac/demo.mac): it finds out how much memory there is by
 reading upwards until the bus times out and the processor traps, prints that in
 decimal with the extended instruction set's DIV, and then waits, the console's
 receiver interrupting for every key.
@@ -33,7 +36,8 @@ receiver interrupting for every key.
 | KD11-A processor with the KE11-E extended instruction set | there |
 | traps, interrupts, the trace bit, the stack limit | there |
 | DL11 console, on the serial line the program is loaded through | there |
-| KW11-L line clock | not yet |
+| KW11-L line clock | there |
+| the SD card's blocks, and where a file of its FAT32 volume is | there |
 | RK11 disk, from an image on the SD card | not yet |
 | KT11-D memory management | not yet |
 
@@ -53,7 +57,7 @@ go install modernc.org/ogo@ed3022eabb19  # v0.43.1-0.20260928095216-ed3022eabb19
 
 ```sh
 ogo run                                  # build, load, and open a terminal
-ogo build --unchecked --clock 200MHz     # as fast as it goes: 167,962 a second
+ogo build --unchecked --clock 200MHz     # as fast as it goes: 166,302 a second
 ogo test ./...                           # the tests, on the board
 scripts/twin.sh                          # the packages' tests under Go, no board needed
 ```
@@ -62,18 +66,21 @@ scripts/twin.sh                          # the packages' tests under Go, no boar
 
 | | |
 | --- | --- |
-| [main.ogo](main.ogo) | the program: three cogs, one stepping the machine, one reading the serial line, one writing it |
+| [main.ogo](main.ogo) | the program: four cogs, one stepping the machine, one reading the serial line, one writing it, one counting the cycles of the line clock |
 | [pdp11](pdp11) | the machine: processor, memory, bus, traps and interrupts |
 | [dl11](dl11) | the console |
+| [kw11](kw11) | the line clock |
+| [sd](sd) | an SD card's blocks, read and written over SPI |
+| [fat](fat) | where on a disk a file of its FAT32 volume is |
 | [mac](mac) | the PDP-11 programs it carries, in MACRO-11 and assembled |
 | [scripts](scripts) | what makes the test vectors, assembles the programs, and runs the tests under Go |
 
-The three cogs share memory and no lock: every variable two of them share is
+The cogs share memory and no lock: every variable two of them share is
 written by one of them only.
 
-Only the program at the root knows about the Propeller 2. The packages are Go
-once they are given a package clause, which is how their tests also run where
-there is no board.
+Only the program at the root and `sd` know about the Propeller 2. The other
+packages are Go once they are given a package clause, which is how their tests
+also run where there is no board. `sd` and `fat` know nothing about the PDP-11.
 
 What writing it found out about OctoGo is in [OCTOGO.md](OCTOGO.md).
 
