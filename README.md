@@ -10,9 +10,9 @@ PDP-11.
 
 ## Status
 
-Early. The processor, the console, the line clock and the disk are there.
-Where the emulator runs under Go, RT-11 V4 begins on it and does what it does
-in SimH. On the board it has not begun yet.
+The processor, the console, the line clock and the disk are there, and RT-11
+V4 runs: it begins from a pack on the SD card and does what it does in SimH.
+There is no memory management yet, which Unix wants.
 
 ```
 $ ogo run
@@ -33,7 +33,16 @@ decimal with the extended instruction set's DIV, and then waits, the console's
 receiver interrupting for every key.
 
 That is what the machine does with no disk. With an SD card in the slot that
-has a file `RK0.DSK`, it begins with what is on that pack.
+has a file `RK0.DSK`, it begins with what is on that pack:
+
+```
+RK0.DSK is the pack in drive 0
+
+303004 instructions in 2599 ms, 116584 a second
+60 cycles of the line clock in 997 ms
+
+RT-11SJ  V04.00C
+```
 
 | | |
 | --- | --- |
@@ -43,13 +52,16 @@ has a file `RK0.DSK`, it begins with what is on that pack.
 | KW11-L line clock | there |
 | the SD card's blocks, and where a file of its FAT32 volume is | there |
 | RK11 disk with RK05 drives, a file on the SD card for a pack | there |
+| RT-11 V4, the single job monitor | runs |
 | KT11-D memory management | not yet |
 
 The processor is tested against the PDP-11/40 of
 [SimH](https://opensimh.org): 2380 cases of a machine before an instruction and
 after it, on the board and on the machine the program is written on. A sweep of
 15,685 more agrees as well. The disk is tested against SimH's too, with a
-program of 35 steps, [mac/disk.mac](mac/disk.mac).
+program of 35 steps, [mac/disk.mac](mac/disk.mac). And so is all of it: a talk
+with RT-11 in which a file is copied, compared and deleted says on the board
+what it says in SimH, and leaves on the card what SimH leaves in its file.
 
 ## Running it
 
@@ -65,6 +77,7 @@ ogo run                                  # build, load, and open a terminal
 ogo build --unchecked --clock 200MHz     # as fast as it goes: 164,318 a second
 ogo test ./...                           # the tests, on the board
 scripts/twin.sh                          # the packages' tests under Go, no board needed
+scripts/talk.py                          # a talk with what is on the pack, on the board and in SimH
 ```
 
 ## How it is put together
