@@ -89,7 +89,7 @@ func (p *pack) Write(block uint32, b []byte) error {
 
 var (
 	machine  pdp11.Machine
-	memory   [28 * 1024]uint16
+	memory   [pdp11.MaxWords]uint16 // all there is, the program reaching its end
 	disk     Controller
 	packs    [2]pack
 	attached bool

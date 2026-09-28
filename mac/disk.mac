@@ -27,7 +27,9 @@
 	buffer	= 20000			; three blocks that are read into
 	other	= 30000			; and three that are written from
 	blocks	= 768.			; words in either
-	top	= 160000		; where memory ends
+	top	= 160000		; where memory ends, in the last 64 KB of
+	mex	= 60			; the bus, which these bits of the control
+					; register put an address in
 
 	creset	= 1			; the functions, with the bit that
 	write	= 3			; begins them
@@ -134,14 +136,15 @@ start:	mov	#start, sp
 	mov	#creset, @#rkcs
 
 ; Memory that ends: two blocks read into the last block of it, and a block
-; written from the last half block.
+; written from the last half block. Memory ends where the I/O page begins,
+; 760000 on a bus of 18 bits.
 	jsr	r4, act
-	.word	1, top-1000, -512., read
+	.word	1, top-1000, -512., read+mex
 	jsr	r4, note
 	.word	21
 	mov	#creset, @#rkcs
 	jsr	r4, act
-	.word	412, top-400, -256., write	; block 202
+	.word	412, top-400, -256., write+mex	; block 202
 	jsr	r4, note
 	.word	22
 	mov	#creset, @#rkcs

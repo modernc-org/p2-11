@@ -55,7 +55,7 @@ def pack(path, drive):
 
 
 def run(simh, mem, start, tmp):
-    lines = ['set cpu 11/40', 'set cpu nommu', 'set cpu 56K']
+    lines = ['set cpu 11/40', 'set cpu 256K']  # 248 KB, all an 11/40 can have
     for dev in 'rha ptr ptp lpt dz rl hk rx rp rq tm tq rom'.split():
         lines.append('set %s disabled' % dev)
     for n in range(8):
