@@ -25,7 +25,7 @@ func (m *Machine) address(spec, size uint16) uint16 {
 	case 3: // @(R)+: the register holds the address of the address
 		a := m.R[r]
 		m.R[r] = a + 2
-		return m.read(a, 2)
+		return m.read(a, 2, dati)
 	case 4: // -(R): the register steps back first
 		a := m.R[r] - size
 		m.R[r] = a
@@ -39,11 +39,11 @@ func (m *Machine) address(spec, size uint16) uint16 {
 		if r == 6 && a < stackLimit {
 			m.stackCheck(a)
 		}
-		return m.read(a, 2)
+		return m.read(a, 2, dati)
 	}
 
 	// X(R) and @X(R): the word after the instruction is added to the register.
-	x := m.read(m.R[7], 2)
+	x := m.read(m.R[7], 2, dati)
 	if m.traps&aborts != 0 {
 		return 0
 	}
@@ -51,5 +51,5 @@ func (m *Machine) address(spec, size uint16) uint16 {
 	if spec>>3 == 6 {
 		return m.R[r] + x
 	}
-	return m.read(m.R[r]+x, 2)
+	return m.read(m.R[r]+x, 2, dati)
 }

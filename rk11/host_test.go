@@ -95,11 +95,13 @@ func guest(t *testing.T, name string) []byte {
 func here(t *testing.T, pack []byte, talk []line) []byte {
 	var (
 		machine pdp11.Machine
+		memory  [28 * 1024]uint16 // what SimH is given
 		console dl11.Line
 		clock   kw11.Clock
 		disk    Controller
 		said    bytes.Buffer
 	)
+	machine.Memory(memory[:])
 	console.Pace(&machine, 1000)
 	disk.Connect(&machine, 0)
 	disk.Attach(0, &file{pack}, false)
@@ -155,7 +157,7 @@ func there(t *testing.T, pack []byte, talk []line) []byte {
 	if err := os.WriteFile(image, pack, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	lines := []string{"set cpu 11/40", "set cpu nommu", "set cpu 56K"}
+	lines := []string{"set cpu 11/40", "set cpu 56K"}
 	for _, device := range strings.Fields("rha ptr ptp lpt dz rl hk rx rp rq tm tq rom") {
 		lines = append(lines, "set "+device+" disabled")
 	}

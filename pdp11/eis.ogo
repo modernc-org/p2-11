@@ -18,7 +18,7 @@ func (m *Machine) value(ir uint16) uint16 {
 	if m.traps&aborts != 0 {
 		return 0
 	}
-	return m.read(a, 2)
+	return m.read(a, 2, dati)
 }
 
 // pair answers the 32 bits in register r and its successor.

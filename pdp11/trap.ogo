@@ -10,6 +10,7 @@
 const (
 	trapOdd      = 1 << iota // a word at an odd address
 	trapTimeout              // an address nothing answers at
+	trapMMU                  // an access a page does not admit
 	trapJump                 // a jump to a register
 	trapReserved             // an instruction this processor does not have
 	trapBPT                  // the BPT instruction
@@ -22,7 +23,7 @@ const (
 	trapCount = iota
 
 	// aborts is the traps that end the instruction that requests them.
-	aborts = trapOdd | trapTimeout
+	aborts = trapOdd | trapTimeout | trapMMU
 
 	// attention is no trap. It is requested with the traps because what it
 	// asks for is what they ask for, which is that the instructions stop
@@ -32,14 +33,15 @@ const (
 )
 
 // trapVector is where each trap's new program counter and status word are.
-var trapVector = [trapCount]uint16{0o004, 0o004, 0o004, 0o010, 0o014, 0o020, 0o030, 0o034, 0o014, 0o004}
+var trapVector = [trapCount]uint16{0o004, 0o004, 0o250, 0o004, 0o010, 0o014, 0o020, 0o030, 0o034, 0o014, 0o004}
 
 // trapClears is what taking each trap withdraws besides the trap itself. An
 // access that failed ends the instruction, so what the instruction would have
 // ended in goes with it; and the instructions that trap are not traced.
 var trapClears = [trapCount]uint16{
-	trapOdd | trapTimeout | trapStack | trapTrace,
-	trapTimeout | trapStack | trapTrace,
+	trapOdd | trapTimeout | trapMMU | trapStack | trapTrace,
+	trapTimeout | trapMMU | trapStack | trapTrace,
+	trapMMU | trapStack | trapTrace,
 	trapJump | trapTrace,
 	trapReserved | trapTrace,
 	trapBPT | trapTrace,
@@ -76,29 +78,38 @@ func (m *Machine) due() bool {
 
 // enter takes a trap or an interrupt through the vector at v: the status word
 // and the program counter go on the stack of the mode the vector names, and
-// new ones come from the vector. It reports false when the vector could not be
-// read or the stack not written, which stops a real processor as well, and it
+// new ones come from the vector. The vector is read in the kernel's space,
+// whatever mode the processor is in, and the stack is written in the space of
+// the mode it belongs to. It reports false when the vector could not be read
+// or the stack not written, which stops a real processor as well, and it
 // stops at the first of the four accesses that fails.
 func (m *Machine) enter(v uint16) bool {
-	pc := m.read(v, 2)
+	old := m.psw
+	now := old >> 14
+	m.space = kernel
+	pc := m.read(v, 2, dati)
 	if m.traps&aborts != 0 {
+		m.space = now
 		return false
 	}
-	psw := m.read(v+2, 2) & statusBits
+	psw := m.read(v+2, 2, dati) & statusBits
 	if m.traps&aborts != 0 {
+		m.space = now
 		return false
 	}
 
-	old := m.psw
-	now, next := old>>14, psw>>14
+	next := psw >> 14
 	m.sp[now] = m.R[6]
 	sp := m.sp[next]
+	m.space = next
 	m.write(sp-2, 2, old)
 	if m.traps&aborts != 0 {
+		m.space = now
 		return false
 	}
 	m.write(sp-4, 2, m.R[7])
 	if m.traps&aborts != 0 {
+		m.space = now
 		return false
 	}
 

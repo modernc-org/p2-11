@@ -28,6 +28,7 @@ func (m *Machine) Run(n uint32) State {
 	state := Running
 	all := n
 	from := m.now
+	mem := m.mem // in registers, for the fetch
 	for n != 0 {
 		// Whatever else there is to do than the next instruction.
 		m.now = from + all - n
@@ -44,6 +45,15 @@ func (m *Machine) Run(n uint32) State {
 			m.traps |= trapTrace
 		}
 
+		// What fetching an instruction looks at, kept in registers for as
+		// long as nothing can have changed it: the status register of the
+		// memory management, and the page the program is in when the unit
+		// is on. A write to a register of the unit, a change of mode and
+		// an abort all end the run of instructions below, so what is here
+		// is looked at again before it is out of date.
+		sr0 := m.sr0
+		codePage, codeLow, codeHigh, codeBase := uint16(8), uint16(0), uint16(0), uint32(0)
+
 		// And then instructions, until one of them asks for that again or
 		// the devices have not been asked for long enough.
 		left := uint32(pollEvery)
@@ -51,12 +61,33 @@ func (m *Machine) Run(n uint32) State {
 			left = n
 		}
 		for {
+			// The unit notes where the instruction is, unless an abort
+			// holds its registers. The instruction is fetched where it
+			// stands if it is in memory the processor reaches as it is, or
+			// in a page it may read from, whose place is looked up when
+			// the program comes to the page.
 			var ir uint16
 			pc := m.R[7]
-			if i := pc >> 1; i < MemWords && pc&1 == 0 {
-				ir = m.mem[i]
+			if sr0&sr0Errors == 0 {
+				m.sr2 = pc
+			}
+			i := uint32(pc >> 1)
+			ok := pc < IOPage
+			if sr0&sr0Enable != 0 {
+				if pc>>13 != codePage {
+					codePage = 8
+					if p := &m.pages[m.space][pc>>13]; p.may&dati != 0 && p.base < ioBase {
+						codePage, codeLow, codeHigh, codeBase = pc>>13, p.low, p.high, p.base
+					}
+				}
+				d := pc & pageOffset
+				i = (codeBase + uint32(d)) >> 1
+				ok = pc>>13 == codePage && d >= codeLow && d <= codeHigh
+			}
+			if ok && pc&1 == 0 && i < uint32(len(mem)) {
+				ir = mem[i]
 			} else {
-				ir = m.read(pc, 2)
+				ir = m.read(pc, 2, dati)
 				if m.traps&aborts != 0 {
 					break // no instruction, so none is counted
 				}
@@ -183,11 +214,11 @@ func (m *Machine) control(ir uint16) {
 		m.waiting = true
 		m.traps |= attention
 	case 0o000002, 0o000006: // RTI, RTT
-		pc := m.read(m.R[6], 2)
+		pc := m.read(m.R[6], 2, dati)
 		if m.traps&aborts != 0 {
 			return
 		}
-		psw := m.read(m.R[6]+2, 2)
+		psw := m.read(m.R[6]+2, 2, dati)
 		if m.traps&aborts != 0 {
 			return
 		}
@@ -222,7 +253,7 @@ func (m *Machine) group0002(ir uint16) {
 	case ir < 0o000210: // RTS
 		r := ir & 7
 		m.R[7] = m.R[r]
-		v := m.read(m.R[6], 2)
+		v := m.read(m.R[6], 2, dati)
 		if m.traps&aborts != 0 {
 			return
 		}
@@ -322,7 +353,7 @@ func (m *Machine) jsr(ir uint16) {
 func (m *Machine) mark(ir uint16) {
 	a := m.R[7] + ir&0o77<<1
 	m.R[7] = m.R[5]
-	v := m.read(a, 2)
+	v := m.read(a, 2, dati)
 	if m.traps&aborts != 0 {
 		return
 	}
@@ -340,7 +371,7 @@ func (m *Machine) swab(ir uint16) {
 		if m.traps&aborts != 0 {
 			return
 		}
-		v = m.read(a, 2)
+		v = m.read(a, 2, datip)
 		if m.traps&aborts != 0 {
 			return
 		}
@@ -391,7 +422,7 @@ func (m *Machine) xor(ir uint16) {
 		if m.traps&aborts != 0 {
 			return
 		}
-		v = m.read(a, 2)
+		v = m.read(a, 2, datip)
 		if m.traps&aborts != 0 {
 			return
 		}
@@ -412,9 +443,10 @@ func (m *Machine) xor(ir uint16) {
 	m.write(a, 2, v)
 }
 
-// mfpi pushes a word of the previous mode's. What is the previous mode's and
-// not the current one's, as long as there is no memory management, is its
-// stack pointer.
+// mfpi pushes a word of the previous mode's: its stack pointer, when that is
+// what the operand names and the modes differ, or the word at the operand's
+// address in the previous mode's space, the address itself having been
+// found in the current one's.
 func (m *Machine) mfpi(ir uint16) {
 	var v uint16
 	s := ir & 0o77
@@ -429,7 +461,9 @@ func (m *Machine) mfpi(ir uint16) {
 		if m.traps&aborts != 0 {
 			return
 		}
-		v = m.read(a, 2)
+		m.space = before
+		v = m.read(a, 2, dati)
+		m.space = now
 		if m.traps&aborts != 0 {
 			return
 		}
@@ -452,7 +486,7 @@ func (m *Machine) mfpi(ir uint16) {
 
 // mtpi pops a word into the previous mode's.
 func (m *Machine) mtpi(ir uint16) {
-	v := m.read(m.R[6], 2)
+	v := m.read(m.R[6], 2, dati)
 	if m.traps&aborts != 0 {
 		return
 	}
@@ -477,7 +511,9 @@ func (m *Machine) mtpi(ir uint16) {
 		if m.traps&aborts != 0 {
 			return
 		}
+		m.space = before
 		m.write(a, 2, v)
+		m.space = now
 	}
 }
 
@@ -505,7 +541,11 @@ func (m *Machine) single(ir, size uint16) {
 			return
 		}
 		if op != 0o50 {
-			v = m.read(a, size)
+			cycle := uint16(datip)
+			if op == 0o57 {
+				cycle = dati // TST does not write it back
+			}
+			v = m.read(a, size, cycle)
 			if m.traps&aborts != 0 {
 				return
 			}
@@ -623,7 +663,7 @@ func (m *Machine) double(ir, size uint16) {
 		if m.traps&aborts != 0 {
 			return
 		}
-		src = m.read(a, size)
+		src = m.read(a, size, dati)
 		if m.traps&aborts != 0 {
 			return
 		}
@@ -641,7 +681,11 @@ func (m *Machine) double(ir, size uint16) {
 		if d < 8 {
 			v = m.R[d] & mask
 		} else {
-			v = m.read(a, size)
+			cycle := uint16(datip)
+			if op == 2 || op == 3 {
+				cycle = dati // CMP and BIT do not write it back
+			}
+			v = m.read(a, size, cycle)
 			if m.traps&aborts != 0 {
 				return
 			}

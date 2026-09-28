@@ -1,0 +1,162 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Memory management: the KT11-D, which relocates the 16-bit addresses of the
+// processor into the 18 bits of the bus, a page of 8 KB at a time, and keeps
+// a program from what its pages do not admit.
+//
+// The kernel and the user each have eight page address registers, PAR, and
+// eight page descriptors, PDR. A PAR holds where the page begins, in blocks
+// of 64 bytes; a PDR how long it is, which way it grows, whether it may be
+// read and written or only read or not at all, and whether it has been
+// written to. An access to a page that does not admit it is aborted: the
+// instruction ends where it stands, as one ended by the bus does, and the
+// trap through 250 finds in SR0 what was wrong and which page of which mode,
+// and in SR2 the address of the instruction. SR0 and SR2 then hold still
+// until the error bits are written away.
+//
+// This is the 11/40's unit: no supervisor mode, no separate data space, no
+// traps that let an access through, no register recording what the
+// instruction did to the registers before it was aborted, and an access
+// control field of two bits. SimH's 11/40 has an SR1 at 177574 that records
+// register changes, which no 11/40 had; here that address answers nothing.
+//
+// What the registers of a page come to is worked out when they are written,
+// into a page, so that an access looks at one thing and does its arithmetic
+// once. Which mode's pages an access goes through is space, which is the
+// current mode but for the moments an instruction reaches into the previous
+// mode's space, and a trap into the kernel's.
+
+const (
+	// The registers, in the I/O page. The page registers of a mode are in one
+	// block: the eight descriptors first and the eight addresses 0o40 on.
+	statusReg   = 0o177572 // SR0
+	addressReg  = 0o177576 // SR2
+	kernelPages = 0o172300
+	userPages   = 0o177600
+	pagesBlock  = 0o100 // bytes of the I/O page a mode's registers take
+
+	// The bits of SR0.
+	sr0Enable      = 1 << 0
+	sr0Page        = 0o000016 // the page an abort was in
+	sr0Mode        = 0o000140 // and the mode
+	sr0Maintenance = 1 << 8   // a bit that is kept and does nothing
+	sr0ReadOnly    = 1 << 13  // the aborts: a write to a page that is read-only,
+	sr0Length      = 1 << 14  // an address past the page's length,
+	sr0NonResident = 1 << 15  // and a page that is not there
+	sr0Errors      = sr0ReadOnly | sr0Length | sr0NonResident
+	sr0Writable    = sr0Errors | sr0Maintenance | sr0Enable
+
+	// The bits of a PAR and of a PDR.
+	parBits    = 0o007777 // where the page begins, in blocks of 64 bytes
+	pdrBits    = 0o077416 // what a write to a descriptor keeps
+	pdrAccess  = 0o000006 // read-only when 2, read and write when 6, nothing otherwise
+	pdrDown    = 1 << 3   // the page grows down: the length says where it begins
+	pdrWritten = 1 << 6   // a word of the page was written
+	pdrLength  = 0o077400 // the last block of the page, or the first of one that grows down
+
+	// A page is 8 KB, the offset into it these bits of the address.
+	pageOffset = 0o017777
+
+	// ioBase is where the I/O page is on the bus, 8 KB below its 18-bit end.
+	ioBase = 0o760000
+
+	// What a page admits, which are the cycles of the bus: dati reads, dato
+	// writes, and datip reads what will be written back, for which the page
+	// must admit both. And whether the page has been written to.
+	dati    = 1 << 0
+	dato    = 1 << 1
+	datip   = dati | dato
+	written = 1 << 2
+
+	user = 3 // the mode, kernel being 0
+)
+
+// A page is what a mode's page address register and page descriptor come to.
+type page struct {
+	base uint32 // where the page begins on the bus
+	low  uint16 // the least offset into the page that is within its length
+	high uint16 // and the greatest
+	may  uint16 // what the page admits
+}
+
+// pageMode answers whose page register is at the address a.
+func pageMode(a uint16) uint16 {
+	if a >= userPages {
+		return user
+	}
+	return kernel
+}
+
+// readPage answers the page register at the even address a.
+func (m *Machine) readPage(a uint16) uint16 {
+	mode, n := pageMode(a), a>>1&7
+	if a&0o40 != 0 {
+		return m.par[mode][n]
+	}
+	return m.pdr[mode][n]
+}
+
+// writePage writes the bits of v that mask selects to the page register at
+// the even address a. A write to either register of a page forgets that the
+// page was written to.
+func (m *Machine) writePage(a, v, mask uint16) {
+	mode, n := pageMode(a), a>>1&7
+	if a&0o40 != 0 {
+		m.par[mode][n] = (m.par[mode][n]&^mask | v&mask) & parBits
+	} else {
+		m.pdr[mode][n] = (m.pdr[mode][n]&^mask | v&mask) & pdrBits
+	}
+	m.pdr[mode][n] &^= pdrWritten
+	m.mapPage(mode, n)
+}
+
+// mapPage works out the page n of the mode from its registers.
+func (m *Machine) mapPage(mode, n uint16) {
+	par, pdr := m.par[mode][n], m.pdr[mode][n]
+	p := &m.pages[mode][n]
+	p.base = uint32(par) << 6
+	length := (pdr & pdrLength) >> 2 // the block, as an offset into the page
+	if pdr&pdrDown != 0 {
+		p.low, p.high = length, pageOffset
+	} else {
+		p.low, p.high = 0, length|0o77
+	}
+	switch pdr & pdrAccess {
+	case 2:
+		p.may = dati
+	case 6:
+		p.may = dati | dato
+	default:
+		p.may = 0
+	}
+	if pdr&pdrWritten != 0 {
+		p.may |= written
+	}
+}
+
+// abort ends an access at the address a that the page does not admit, cycle
+// being what the access wanted of it, and records why in SR0 unless an
+// earlier abort holds it.
+func (m *Machine) abort(a, cycle uint16) {
+	mode, n := m.space, a>>13
+	pdr := m.pdr[mode][n]
+	var err uint16
+	switch {
+	case pdr&pdrAccess == 6:
+	case pdr&pdrAccess == 2 && cycle&dato != 0:
+		err = sr0ReadOnly
+	case pdr&pdrAccess == 2:
+	default:
+		err = sr0NonResident
+	}
+	block, length := a>>6&0o177, pdr>>8&0o177
+	if pdr&pdrDown != 0 && block < length || pdr&pdrDown == 0 && block > length {
+		err |= sr0Length
+	}
+	if m.sr0&sr0Errors == 0 {
+		m.sr0 = m.sr0&^(sr0Mode|sr0Page) | mode<<5 | n<<1 | err
+	}
+	m.traps |= trapMMU
+}

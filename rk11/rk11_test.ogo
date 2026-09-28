@@ -89,10 +89,15 @@ func (p *pack) Write(block uint32, b []byte) error {
 
 var (
 	machine  pdp11.Machine
+	memory   [28 * 1024]uint16
 	disk     Controller
 	packs    [2]pack
 	attached bool
 )
+
+func init() {
+	machine.Memory(memory[:])
+}
 
 // fresh answers a machine that has the controller and nothing else, with
 // packs in the drives 0 and 1 that nothing was written to, and memory that is

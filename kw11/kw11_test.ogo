@@ -17,8 +17,13 @@ const lks = 0o177546
 var (
 	clock    Clock
 	machine  pdp11.Machine
+	memory   [28 * 1024]uint16
 	attached bool
 )
+
+func init() {
+	machine.Memory(memory[:])
+}
 
 // expect fails the test unless got is want.
 func expect(t *testing.T, what string, got, want uint16) {

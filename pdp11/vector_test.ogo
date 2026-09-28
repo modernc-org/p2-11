@@ -6,7 +6,8 @@ import "testing"
 
 // The processor against the vectors of vectors_test.ogo, which say what the
 // 11/40 of SimH made of each instruction. scripts/vectors.py writes them and
-// has the other half of what is said here about where a case's memory is.
+// has the other half of what is said here about where a case's memory is and
+// how its memory management is set up.
 
 const (
 	// region is where a case's memory is laid out: the first bytes of it, which
@@ -30,15 +31,15 @@ const (
 
 	// maxFailures is how many cases are reported before the test gives up.
 	maxFailures = 10
-
-	user = 3
 )
 
 var stateNames = [stateSize]string{"R0", "R1", "R2", "R3", "R4", "R5", "SP", "KSP", "USP", "PC", "PSW"}
 
 var (
-	// vm is the machine the vectors run on. It is too large for a stack.
-	vm Machine
+	// vm is the machine the vectors run on, with as much memory as SimH was
+	// given.
+	vm       Machine
+	vmMemory [28 * 1024]uint16
 
 	// want is what a case's memory is to be after it.
 	want [region / 2]uint16
@@ -57,7 +58,8 @@ var (
 )
 
 // background is what the address a holds before a case puts its own there: the
-// vectors of the traps, each leading to two NOPs, and nothing else.
+// vectors of the traps, each leading to two NOPs, and nothing else. The
+// vector of the memory management, 250, leads there too.
 func background(a uint16) uint16 {
 	switch {
 	case a >= 0o4 && a < 0o40:
@@ -67,11 +69,40 @@ func background(a uint16) uint16 {
 		return 0o340 + a>>2
 	case a >= 0o3404 && a < 0o3440:
 		return 0o000240
+	case a == 0o250:
+		return 0o3650
+	case a == 0o252:
+		return 0o352
+	case a >= 0o3650 && a < 0o3670:
+		return 0o000240
 	}
 	return 0
 }
 
+// managed is what the registers of the memory management hold before a case
+// sets its own: every page of both modes where the address says it is, the
+// eighth on the I/O page, and the unit off. A case names what it changes,
+// and what changes.
+func managed(vm *Machine) {
+	for mode := uint16(kernel); mode <= user; mode += user {
+		block := uint16(kernelPages)
+		if mode == user {
+			block = userPages
+		}
+		for n := uint16(0); n < 8; n++ {
+			par := n << 7
+			if n == 7 {
+				par = 0o7600
+			}
+			vm.Deposit(block+0o40+2*n, par)
+			vm.Deposit(block+2*n, 0o77406)
+		}
+	}
+	vm.Deposit(statusReg, 0)
+}
+
 func TestVectors(t *testing.T) {
+	vm.Memory(vmMemory[:])
 	failures := 0
 	number = 0
 	for v := vectors[:]; len(v) != 0; number++ {
@@ -101,7 +132,7 @@ func TestVectors(t *testing.T) {
 // what the cases leave it holding. It says what it finds there and removes it.
 func untouched() bool {
 	ok := true
-	for i := region / 2; i < MemWords; i++ {
+	for i := region / 2; i < len(vm.mem); i++ {
 		if vm.mem[i] != 0 {
 			printf("vector %d or one before it: memory at %06o %06o, which no case names\n",
 				number, 2*i, vm.mem[i])
@@ -114,11 +145,15 @@ func untouched() bool {
 
 // runCase runs the current case and leaves in good whether the machine came
 // out of it as the reference did, having said what differs if it did not.
+// A word a case names in the I/O page is a register of the memory
+// management, which is deposited and examined as the console does.
 func runCase() {
 	before := current[caseSize-2*stateSize : caseSize-stateSize]
 	after := current[caseSize-stateSize : caseSize]
 	words := current[caseSize:]
 
+	vm.Reset()
+	managed(&vm)
 	for a := uint16(0); a < region; a += 2 {
 		v := background(a)
 		vm.mem[a>>1] = v
@@ -126,17 +161,22 @@ func runCase() {
 	}
 	for i := 0; i < len(words); i += 3 {
 		a := words[i]
-		vm.mem[a>>1] = words[i+1]
-		if a < region {
+		switch {
+		case a >= IOPage:
+			vm.Deposit(a, words[i+1])
+		case a < region:
+			vm.mem[a>>1] = words[i+1]
 			want[a>>1] = words[i+2]
+		default:
+			vm.mem[a>>1] = words[i+1]
 		}
 	}
 
-	vm.Reset()
 	copy(vm.R[:6], before)
 	vm.sp[kernel] = before[stateKSP]
 	vm.sp[user] = before[stateUSP]
 	vm.psw = before[statePSW]
+	vm.space = vm.psw >> 14
 	vm.R[6] = before[stateSP]
 	vm.R[7] = before[statePC]
 
@@ -168,7 +208,13 @@ func runCase() {
 		}
 	}
 	for i := 0; i < len(words); i += 3 {
-		if a := words[i]; a >= region {
+		switch a := words[i]; {
+		case a >= IOPage:
+			if got, _ := vm.Examine(a); got != words[i+2] {
+				differs()
+				printf("\tregister %06o %06o, want %06o\n", a, got, words[i+2])
+			}
+		case a >= region:
 			if got := vm.mem[a>>1]; got != words[i+2] {
 				differs()
 				printf("\tmemory at %06o %06o, want %06o\n", a, got, words[i+2])

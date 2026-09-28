@@ -64,7 +64,7 @@ def simh(binary, pack, lines, tmp):
     image = os.path.join(tmp, 'rk0.dsk')
     shutil.copy(pack, image)
     os.chmod(image, 0o600)
-    ini = ['set cpu 11/40', 'set cpu nommu', 'set cpu 56K']
+    ini = ['set cpu 11/40', 'set cpu 56K']
     for dev in 'rha ptr ptp lpt dz rl hk rx rp rq tm tq rom'.split():
         ini.append('set %s disabled' % dev)
     for n in range(1, 8):

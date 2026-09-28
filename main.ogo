@@ -42,7 +42,15 @@ var (
 	machine pdp11.Machine
 	console dl11.Line
 	clock   kw11.Clock
+
+	// memory is all that 18 bits of address reach: 248 KB. It is part of
+	// the binary, so the binary is that much larger to load.
+	memory [pdp11.MaxWords]uint16
 )
+
+func init() {
+	machine.Memory(memory[:])
+}
 
 // receive hands the console what arrives on the serial line.
 func receive() {

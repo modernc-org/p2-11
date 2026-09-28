@@ -2,8 +2,10 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// The bus: memory below the I/O page, and in the I/O page the registers of the
-// processor and of the devices.
+// The bus: memory, and in the I/O page the registers of the processor and of
+// the devices. An address of the processor's is relocated onto the bus by
+// the memory management when that is on, and is the bus's own otherwise, the
+// I/O page then being the top of what 16 bits reach.
 //
 // An access that cannot be made does not stop the instruction where it stands,
 // there being nothing in the language to unwind with. It requests a trap and
@@ -15,11 +17,36 @@
 // costs more here than what these functions do. So each is one function with
 // memory first, and what is rare is what it calls.
 
-// read reads what is at the address a: a word, or a byte if size is 1.
-func (m *Machine) read(a, size uint16) uint16 {
-	i := a >> 1
-	if i >= MemWords {
-		return m.readIO(a, size)
+// read reads what is at the address a: a word, or a byte if size is 1. The
+// cycle is dati for a read and datip for one the instruction will write
+// back, which a page must admit writing for, as the abort comes before the
+// read on the real machine and before the instruction has done anything.
+func (m *Machine) read(a, size, cycle uint16) uint16 {
+	if size == 2 && a&1 != 0 {
+		m.traps |= trapOdd
+		return 0
+	}
+	pa := uint32(a)
+	if m.sr0&sr0Enable == 0 {
+		if a >= IOPage {
+			return m.readIO(a, size)
+		}
+	} else {
+		p := &m.pages[m.space][a>>13]
+		d := a & pageOffset
+		if d < p.low || d > p.high || p.may&cycle != cycle {
+			m.abort(a, cycle)
+			return 0
+		}
+		pa = p.base + uint32(d)
+		if pa >= ioBase {
+			return m.readIO(uint16(pa-ioBase)+IOPage, size)
+		}
+	}
+	i := pa >> 1
+	if i >= uint32(len(m.mem)) {
+		m.traps |= trapTimeout
+		return 0
 	}
 	if size == 1 {
 		if a&1 != 0 {
@@ -27,19 +54,42 @@ func (m *Machine) read(a, size uint16) uint16 {
 		}
 		return m.mem[i] & 0xff
 	}
-	if a&1 != 0 {
-		m.traps |= trapOdd
-		return 0
-	}
 	return m.mem[i]
 }
 
 // write writes v at the address a: a word, or a byte if size is 1, and then
 // nothing beside the byte.
 func (m *Machine) write(a, size, v uint16) {
-	i := a >> 1
-	if i >= MemWords {
-		m.writeIO(a, size, v)
+	if size == 2 && a&1 != 0 {
+		m.traps |= trapOdd
+		return
+	}
+	pa := uint32(a)
+	if m.sr0&sr0Enable == 0 {
+		if a >= IOPage {
+			m.writeIO(a, size, v)
+			return
+		}
+	} else {
+		p := &m.pages[m.space][a>>13]
+		d := a & pageOffset
+		if d < p.low || d > p.high || p.may&dato != dato {
+			m.abort(a, dato)
+			return
+		}
+		if p.may&written == 0 {
+			p.may |= written
+			m.pdr[m.space][a>>13] |= pdrWritten
+		}
+		pa = p.base + uint32(d)
+		if pa >= ioBase {
+			m.writeIO(uint16(pa-ioBase)+IOPage, size, v)
+			return
+		}
+	}
+	i := pa >> 1
+	if i >= uint32(len(m.mem)) {
+		m.traps |= trapTimeout
 		return
 	}
 	if size == 1 {
@@ -48,10 +98,6 @@ func (m *Machine) write(a, size, v uint16) {
 			return
 		}
 		m.mem[i] = m.mem[i]&0xff00 | v&0xff
-		return
-	}
-	if a&1 != 0 {
-		m.traps |= trapOdd
 		return
 	}
 	m.mem[i] = v
@@ -78,17 +124,23 @@ func (m *Machine) readIO(a, size uint16) uint16 {
 		return 0
 	}
 	var w uint16
-	switch a &^ 1 {
-	case StatusWord:
+	switch r := a &^ 1; {
+	case r == StatusWord:
 		w = m.psw
-	case SwitchRegister:
+	case r == SwitchRegister:
 		w = m.Switches
+	case r == statusReg:
+		w = m.sr0
+	case r == addressReg:
+		w = m.sr2
+	case r>>6 == kernelPages>>6 || r>>6 == userPages>>6:
+		w = m.readPage(r)
 	default:
 		d := m.device(a)
 		if d == nil {
 			return 0
 		}
-		w = d.Read(a &^ 1)
+		w = d.Read(r)
 	}
 	switch {
 	case size == 2:
@@ -114,22 +166,31 @@ func (m *Machine) writeIO(a, size, v uint16) {
 		m.traps |= trapOdd
 		return
 	}
-	switch a &^ 1 {
-	case StatusWord:
+	switch r := a &^ 1; {
+	case r == StatusWord:
 		// A program changes everything in the status word but the trace bit,
 		// which only a trap and a return from one change.
 		m.setPSW((m.psw&^mask|v&mask)&^flagT | m.psw&flagT)
-	case SwitchRegister:
+	case r == SwitchRegister:
 		m.Display = m.Display&^mask | v&mask
+	case r == statusReg:
+		// The error bits, the maintenance bit and the enable bit are the
+		// program's to write; the page and the mode of an abort are not.
+		m.sr0 = m.sr0&^(mask&sr0Writable) | v&mask&sr0Writable
+		m.traps |= attention // what the fetch looks at has changed
+	case r == addressReg:
+	case r>>6 == kernelPages>>6 || r>>6 == userPages>>6:
+		m.writePage(r, v, mask)
+		m.traps |= attention
 	default:
 		if d := m.device(a); d != nil {
-			d.Write(a&^1, v, mask)
+			d.Write(r, v, mask)
 		}
 	}
 }
 
-// setPSW makes v the status word. A change of mode changes the stack pointer:
-// each mode has its own.
+// setPSW makes v the status word. A change of mode changes the stack pointer,
+// each mode having its own, and the pages an access goes through.
 func (m *Machine) setPSW(v uint16) {
 	v &= statusBits
 	if now, next := m.psw>>14, v>>14; now != next {
@@ -137,5 +198,6 @@ func (m *Machine) setPSW(v uint16) {
 		m.R[6] = m.sp[next]
 	}
 	m.psw = v
+	m.space = v >> 14
 	m.traps |= attention // the priority may have come down to below a request
 }

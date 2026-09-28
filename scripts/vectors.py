@@ -6,10 +6,11 @@
 """vectors.py makes the processor's test vectors by asking SimH.
 
 A vector is a machine before an instruction and the same machine after it: the
-registers, the status word, and the memory the instruction could reach. This
-script thinks up the instructions and what they operate on, has SimH's PDP-11/40
-execute each, and writes down what SimH made of it as an OctoGo table that
-pdp11/vector_test.ogo runs the processor against.
+registers, the status word, the memory the instruction could reach, and the
+registers of the memory management it changes. This script thinks up the
+instructions and what they operate on, has SimH's PDP-11/40 execute each, and
+writes down what SimH made of it as an OctoGo table that pdp11/vector_test.ogo
+runs the processor against.
 
 SimH is the reference for behaviour and nothing of it is in the repository.
 scripts/tools.sh fetches and builds it, into tools/.
@@ -54,6 +55,53 @@ NOP = 0o000240
 NOWHERE = 0o160000  # an address nothing answers at
 PSW = 0o177776
 
+# The memory management: its registers, where a case's pages go, and what
+# every case begins with, which is every page of both modes where its address
+# says it is, the eighth on the I/O page, and the unit off. A case names the
+# registers it sets, and the table holds those and the ones that changed.
+SR0 = 0o177572
+SR2 = 0o177576
+KERNEL = 0
+USER = 3
+PAGE = 0o20000
+KERNEL_PDR, KERNEL_PAR = 0o172300, 0o172340
+USER_PDR, USER_PAR = 0o177600, 0o177640
+ELSEWHERE = (0o1000, 0o1200, 0o1400)  # page addresses of 100000, 120000 and 140000
+FULL = 0o77406  # a page descriptor: the whole page, read and write
+
+
+def page_registers(mode, n):
+    """The addresses of the page address and descriptor registers of the page
+    n of a mode."""
+    if mode == USER:
+        return USER_PAR + 2 * n, USER_PDR + 2 * n
+    return KERNEL_PAR + 2 * n, KERNEL_PDR + 2 * n
+
+
+def register_name(a):
+    """What SimH calls the register at the I/O address a."""
+    if a == SR0:
+        return 'mmr0'
+    if a == SR2:
+        return 'mmr2'
+    mode = 'u' if a >= USER_PDR else 'k'
+    kind = 'par' if a & 0o40 else 'pdr'
+    return '%si%s%d' % (mode, kind, a >> 1 & 7)
+
+
+def managed_background():
+    out = {SR0: 0}
+    for mode in (KERNEL, USER):
+        for n in range(8):
+            par, pdr = page_registers(mode, n)
+            out[par] = n << 7 if n < 7 else 0o7600
+            out[pdr] = FULL
+    return out
+
+
+MANAGED = managed_background()
+SR0_READABLE = 0o160557
+
 EDGES = (0, 1, 2, 0o77777, 0o100000, 0o100001, 0o177777, 0o177776, 0o377,
          0o400, 0o200, 0o177, 0o201, 0o125252, 0o052525, 0o177400, 0o000100)
 
@@ -63,6 +111,12 @@ def background(a):
     if 0o4 <= a < 0o40:
         return HANDLERS + a if a & 2 == 0 else 0o340 + (a >> 2)
     if HANDLERS + 4 <= a < HANDLERS + 0o40:
+        return NOP
+    if a == 0o250:
+        return HANDLERS + 0o250
+    if a == 0o252:
+        return 0o352
+    if HANDLERS + 0o250 <= a < HANDLERS + 0o270:
         return NOP
     return 0
 
@@ -81,9 +135,41 @@ class Case:
             self.psw |= 0o140000 | rnd.choice((0, 0o030000))
         self.mem = {CODE: ir}
         self.next = CODE + 2  # where the next word of the instruction goes
+        self.io = {}  # the registers of the memory management the case sets
 
     def user(self):
         return self.psw & 0o140000 != 0
+
+    def mode(self):
+        return USER if self.user() else KERNEL
+
+    def previous(self):
+        return self.psw >> 12 & 3
+
+    def manage(self):
+        """Turn the memory management on, with the pages as they are."""
+        self.io[SR0] = 1
+
+    def page(self, mode, n, par=None, pdr=None):
+        """Give the page n of a mode its address and its descriptor."""
+        par_at, pdr_at = page_registers(mode, n)
+        if par is not None:
+            self.io[par_at] = par
+        if pdr is not None:
+            self.io[pdr_at] = pdr
+
+    def register(self, a):
+        return self.io.get(a, MANAGED[a])
+
+    def phys(self, a, mode=None):
+        """Where the address a of a mode's space is on the bus, if the page is
+        there at all; the case's own mode unless one is given."""
+        if not self.io.get(SR0, 0) & 1:
+            return a
+        par_at, pdr_at = page_registers(self.mode() if mode is None else mode, a >> 13)
+        if self.register(pdr_at) & 6 == 0:
+            return None
+        return (self.register(par_at) << 6) + (a & 0o17777)
 
     def sp(self):
         return self.usp if self.user() else self.ksp
@@ -94,12 +180,14 @@ class Case:
         else:
             self.ksp = v
 
-    def poke(self, a, v):
-        if a < MEMORY:
+    def poke(self, a, v, mode=None):
+        a = self.phys(a, mode)
+        if a is not None and a < MEMORY:
             self.mem[a & 0o177776] = v & 0o177777
 
-    def poke_byte(self, a, v):
-        if a >= MEMORY:
+    def poke_byte(self, a, v, mode=None):
+        a = self.phys(a, mode)
+        if a is None or a >= MEMORY:
             return
         w = self.mem.get(a & 0o177776, word(self.rnd))
         if a & 1:
@@ -111,13 +199,14 @@ class Case:
     def extend(self, v):
         """Put v where the instruction's next word goes and answer the
         address after it, which is what the program counter then holds."""
-        self.mem[self.next] = v & 0o177777
+        self.poke(self.next, v)
         self.next += 2
         return self.next
 
-    def operand(self, spec, value, size=2, at=None):
+    def operand(self, spec, value, size=2, at=None, space=None):
         """Arrange for the operand that the specifier spec addresses to be
-        value, at the address at if one is given."""
+        value, at the address at if one is given, in the space of the mode
+        space if the instruction reaches into another mode's."""
         mode, r = spec >> 3, spec & 7
         if mode == 0:
             if r < 6:
@@ -135,9 +224,9 @@ class Case:
         if r == 6:
             cell = self.sp() - 0o60 - 2 * self.rnd.randrange(8)
         if size == 1:
-            self.poke_byte(at, value)
+            self.poke_byte(at, value, space)
         elif at & 1 == 0:
-            self.poke(at, value)
+            self.poke(at, value, space)
 
         def point(v):
             if r == 6:
@@ -391,6 +480,164 @@ def systematic(rnd, scale):
     return cases
 
 
+def managed(rnd, scale):
+    """The cases of the memory management: pages elsewhere than their
+    addresses say, every abort there is, in both modes and in the previous
+    mode's space, and the registers themselves."""
+    cases = []
+
+    def add(c, steps=1):
+        c.steps = steps
+        cases.append(c)
+        return c
+
+    def within(page, size=2):
+        """An address in the page, a word's if size is 2."""
+        return page * PAGE + 2 * rnd.randrange(0o4000) + (rnd.randrange(2) if size == 1 else 0)
+
+    # Pages elsewhere: operands in pages 1 to 3, which are at 100000, 120000
+    # and 140000, through every mode, in both modes of the processor.
+    ops = (0o01, 0o02, 0o03, 0o04, 0o05, 0o06, 0o16, 0o11, 0o12, 0o13, 0o14, 0o15)
+    singles = (0o0050, 0o0052, 0o0053, 0o0057, 0o0060, 0o0063, 0o1050, 0o1052, 0o1057, 0o1063, 0o0003, 0o0067, 0o0074)
+    for _ in range(scale):
+        for op in ops:
+            size = 1 if 0o11 <= op <= 0o15 else 2
+            for dm in range(1, 8):
+                sm = rnd.randrange(1, 8)
+                ir = op << 12 | sm << 9 | rnd.randrange(6) << 6 | dm << 3 | rnd.randrange(6)
+                c = add(Case(rnd, ir, user=rnd.random() < 0.3))
+                c.manage()
+                for mode in (KERNEL, USER):
+                    for n in (1, 2, 3):
+                        c.page(mode, n, ELSEWHERE[n - 1])
+                c.operand(ir >> 6 & 0o77, value(rnd, size), size, at=within(rnd.randrange(1, 4), size))
+                c.operand(ir & 0o77, value(rnd, size), size, at=within(rnd.randrange(1, 4), size))
+        for op in singles:
+            size = 1 if op & 0o1000 else 2
+            ir = (op & 0o777) << 6 | (op & 0o1000) << 6 | rnd.randrange(1, 8) << 3 | rnd.randrange(6)
+            if op == 0o0074:
+                ir = 0o074000 | rnd.randrange(6) << 6 | rnd.randrange(1, 8) << 3 | rnd.randrange(6)
+            c = add(Case(rnd, ir, user=rnd.random() < 0.3))
+            c.manage()
+            for mode in (KERNEL, USER):
+                for n in (1, 2, 3):
+                    c.page(mode, n, ELSEWHERE[n - 1])
+            c.operand(ir & 0o77, value(rnd, size), size, at=within(rnd.randrange(1, 4), size))
+
+    # Aborts: a page that is not there, one that is read-only, one that is
+    # shorter than the address, growing either way, and each on a read, a
+    # write, and a read that would be written back; and the trap they end in,
+    # from which the second step sees the registers frozen.
+    reads = (0o013700, 0o113700, 0o005737, 0o105737, 0o023700, 0o033700)
+    writes = (0o005037, 0o105037, 0o012737, 0o112737, 0o006737)
+    modifies = (0o005237, 0o105237, 0o062737, 0o042737, 0o052737, 0o000337, 0o074037, 0o106337, 0o005337)
+    pdrs = (0, 0o77404, 0o77402, 0o1406, 0o1416, 0o402, 0o1400, 0o402 | 0o10, 0o10)
+    for _ in range(scale):
+        for pdr in pdrs:
+            for ir in reads + writes + modifies:
+                c = add(Case(rnd, ir, user=rnd.random() < 0.4), steps=rnd.choice((1, 2)))
+                c.manage()
+                for mode in (KERNEL, USER):
+                    c.page(mode, 1, ELSEWHERE[0], pdr)
+                size = 1 if ir & 0o100000 else 2
+                src, dst = ir >> 6 & 0o77, ir & 0o77
+                if src == 0o27:
+                    c.operand(src, value(rnd, size), size)
+                elif src == 0o37:
+                    c.operand(src, value(rnd, size), size, at=within(1, size))
+                elif src < 8:
+                    c.operand(src, value(rnd, size), size)
+                at = within(1, size)
+                if rnd.random() < 0.5:  # near the length, either side of it
+                    at = PAGE + rnd.choice((0o374, 0o376, 0o400, 0o402, 0o276, 0o300, 0o302, 0o17776))
+                c.operand(dst, value(rnd, size), size, at=at)
+
+    # The instruction itself, and the word after it, in a page that is not
+    # there or too short for it.
+    for pdr in (0, 0o1406, 0o77402):
+        for ir in (NOP, 0o013700, 0o012737, 0o005037, 0o000167):
+            c = add(Case(rnd, ir), steps=2)
+            c.manage()
+            c.page(KERNEL, 1, ELSEWHERE[0], pdr)
+            c.pc = PAGE + rnd.choice((0, 0o400, 0o1000))
+            c.mem = {}
+            c.next = c.pc + 2
+            c.poke(c.pc, ir)
+            if ir >> 12:
+                c.operands()
+            elif ir != NOP:
+                c.destination()
+        for ir in (0o013700, 0o012737, 0o005037, 0o016700, 0o005067):
+            c = add(Case(rnd, ir), steps=2)
+            c.manage()
+            c.page(KERNEL, 1, ELSEWHERE[0], pdr)
+            c.pc = PAGE - 2 if ir != 0o012737 else PAGE - 4
+            c.mem = {c.pc: ir}
+            c.next = c.pc + 2
+            if ir >> 12:
+                c.operands()
+            else:
+                c.destination()
+
+    # The previous mode's space: what MFPI reads and MTPI writes is the other
+    # mode's page 1, which is elsewhere than this mode's, or not there.
+    for ir in (0o006537, 0o006637, 0o106537, 0o106637, 0o006517, 0o006617, 0o006567, 0o006667):
+        for pdr in (FULL, FULL, 0, 0o77402):
+            c = add(Case(rnd, ir, user=rnd.random() < 0.5), steps=2 if pdr != FULL else 1)
+            if rnd.random() < 0.7:
+                c.psw = c.psw & ~0o030000 | (0 if c.user() else 0o030000)
+            c.manage()
+            c.page(c.mode(), 1, ELSEWHERE[0])
+            c.page(c.previous(), 1, ELSEWHERE[1], pdr)
+            c.operand(ir & 0o77, word(rnd), at=within(1), space=c.previous())
+            c.poke(c.sp(), word(rnd))
+
+    # The registers: read and written, in words and in bytes, with every
+    # bit, the unit on and off, and a write to a page's register forgetting
+    # that the page was written to.
+    regs = [SR0, SR2] + [a for a in MANAGED if a not in (SR0, SR2)]
+    for _ in range(scale):
+        for a in regs:
+            for ir in rnd.sample((0o013700, 0o113700, 0o012737, 0o112737, 0o052737, 0o042737, 0o005237, 0o105237, 0o005037), 2):
+                for on in (False, True):
+                    c = add(Case(rnd, ir, user=rnd.random() < 0.2))
+                    if on:
+                        c.manage()
+                    src, dst = ir >> 6 & 0o77, ir & 0o77
+                    v = rnd.choice((0o177777, 0o000001, 0o160401, 0o77416, 0o7777, 0o125252, 0o052525, word(rnd)))
+                    if src == 0o27:
+                        c.operand(src, v, 1 if ir & 0o100000 else 2)
+                    at = a + (1 if ir & 0o100000 and rnd.random() < 0.5 else 0)
+                    if src == 0o37:
+                        c.operand(src, 0, at=at)
+                    if dst == 0o37:
+                        c.operand(dst, 0, at=at)
+    for a in (SR0, SR2):  # the status registers, read by the trap's handler
+        c = add(Case(rnd, 0o013700), steps=2)
+        c.manage()
+        c.page(KERNEL, 1, ELSEWHERE[0], 0)
+        c.mem = {CODE: 0o013700, CODE + 2: PAGE}
+        c.next = CODE + 4
+        c.mem[HANDLERS + 0o250] = 0o013702
+        c.mem[HANDLERS + 0o252] = a
+    for _ in range(4 * scale):  # frozen: an abort's record stays, and SR2 with it
+        c = add(Case(rnd, 0o005037), steps=rnd.choice((1, 2)))
+        c.manage()
+        c.io[SR0] = rnd.choice((0o100001, 0o040001, 0o020001, 0o140001))
+        c.page(KERNEL, 1, ELSEWHERE[0], rnd.choice((0, 0o77402, FULL)))
+        c.operand(0o37, 0, at=within(1))
+    for _ in range(4 * scale):  # a page written to, then its register written
+        c = add(Case(rnd, 0o005037), steps=2)
+        c.manage()
+        c.page(KERNEL, 1, ELSEWHERE[0])
+        c.operand(0o37, word(rnd), at=within(1))
+        par, pdr = page_registers(KERNEL, 1)
+        c.mem[c.next] = 0o012737
+        c.mem[c.next + 2] = rnd.choice((ELSEWHERE[0], FULL))
+        c.mem[c.next + 4] = rnd.choice((par, pdr))
+    return cases
+
+
 def scattered(rnd, n):
     """Cases that are whatever sixteen bits come up."""
     cases = []
@@ -412,18 +659,21 @@ def scattered(rnd, n):
 
 def run(simh, cases):
     """Have SimH execute the cases, and give each its outcome: what SimH said
-    when it stopped, the registers, and the words of memory that are not zero."""
+    when it stopped, the registers, the words of memory that are not zero,
+    and the registers of the memory management."""
     lines = [
-        'set cpu 11/40', 'set cpu nommu', 'set cpu 56K',
+        'set cpu 11/40', 'set cpu 56K',
     ]
     for dev in 'rha ptr ptp lpt dz rk rl hk rx rp rq tm tq rom'.split():
         lines.append('set %s disabled' % dev)
-    # SimH keeps its clock and its console whatever it is told. The machine
-    # under test has neither, so a case that touches one is stopped there,
-    # which leaves it out.
-    for there in ('177546-177547', '177560-177567'):
+    # SimH keeps its clock and its console whatever it is told, and its 11/40
+    # has an SR1 at 177574 that no 11/40 had. The machine under test has none
+    # of them, so a case that touches one is stopped there, which leaves it
+    # out.
+    for there in ('177546-177547', '177560-177567', '177574-177575'):
         lines.append('break -r %s' % there)
         lines.append('break -w %s' % there)
+    managed_names = [register_name(a) for a in sorted(MANAGED) if a != SR0] + ['mmr2']
     lines.append('echo #START')
     for i, c in enumerate(cases):
         lines.append('reset all')
@@ -433,6 +683,10 @@ def run(simh, cases):
                 lines.append('deposit %o %o' % (a, background(a)))
         for a, v in sorted(c.mem.items()):
             lines.append('deposit %o %o' % (a, v))
+        for a in sorted(MANAGED):
+            if a != SR0:
+                lines.append('deposit %s %o' % (register_name(a), c.register(a)))
+        lines.append('deposit mmr0 %o' % c.register(SR0))  # last: the unit may go on
         for j, v in enumerate(c.r):
             lines.append('deposit r%d %o' % (j, v))
         lines.append('deposit ksp %o' % c.ksp)
@@ -444,6 +698,8 @@ def run(simh, cases):
         lines.append('step %d' % c.steps)
         lines.append('echo #STATE')
         lines.append('examine r0,r1,r2,r3,r4,r5,sp,ksp,usp,pc,psw')
+        lines.append('echo #MANAGED')
+        lines.append('examine mmr0,' + ','.join(managed_names))
         lines.append('echo #MEMORY')
         lines.append('examine !=0 0-%o' % (MEMORY - 2))
     lines.append('echo #END')
@@ -474,7 +730,8 @@ def run(simh, cases):
         sys.exit('vectors.py: SimH answered %d cases of %d' % (len(chunks), len(cases)))
     for c, chunk in zip(cases, chunks):
         head, rest = chunk.split('#STATE\n', 1)
-        state, memory = rest.split('#MEMORY\n', 1)
+        state, rest = rest.split('#MANAGED\n', 1)
+        registers, memory = rest.split('#MEMORY\n', 1)
         head = [l.strip() for l in head.split('\n')[1:] if l.strip()]
         c.text = '?'
         for l in head:
@@ -482,6 +739,13 @@ def run(simh, cases):
                 c.text = l.split('\t', 1)[1]
         c.stop = head[-1]
         c.after = [int(l.split('\t')[1], 8) for l in state.strip().split('\n')]
+        c.managed = {}
+        for l in registers.strip().split('\n'):
+            name, v = l.split(':\t')
+            v = int(v.split()[0], 8)
+            if name.lower() == 'mmr0':
+                v &= SR0_READABLE  # what a program sees of it
+            c.managed[name.lower()] = v
         c.final = {}
         for l in memory.strip().split('\n'):
             if not re.match(r'^[0-7]+:\t[0-7]+', l):
@@ -490,7 +754,7 @@ def run(simh, cases):
                 continue
             a, v = l.split(':\t')
             c.final[int(a, 8)] = int(v.split()[0], 8)
-        if len(c.after) != 11:
+        if len(c.after) != 11 or len(c.managed) != 34:
             sys.exit('vectors.py: cannot read what SimH said of case %s' % c.text)
     return version
 
@@ -520,11 +784,12 @@ def table(cases, version, args):
         '// The reference is the 11/40 of SimH, %s.' % version,
         '',
         '// vectors is the cases, one after another. A case is how many steps it',
-        '// takes, whether the last of them is a HALT and how many words of memory',
-        '// it names; the machine before and the machine after -- R0 to R5, the',
-        '// stack pointer, the kernel\'s, the user\'s, the program counter and the',
-        '// status word -- and the words: for each its address, what it holds',
-        '// before and what after.',
+        '// takes, whether the last of them is a HALT and how many words it names;',
+        '// the machine before and the machine after -- R0 to R5, the stack',
+        '// pointer, the kernel\'s, the user\'s, the program counter and the status',
+        '// word -- and the words: for each its address, what it holds before and',
+        '// what after. A word in the I/O page is a register of the memory',
+        '// management, which the harness sets and reads as the console does.',
         'var vectors = [...]uint16{',
     ]
     for i, c in enumerate(cases):
@@ -535,6 +800,14 @@ def table(cases, version, args):
             now = c.final.get(a, 0)
             if a in c.mem or now != was:
                 words += [a, was, now]
+        for a in sorted(MANAGED):
+            was = c.register(a)
+            now = c.managed[register_name(a)]
+            if a in c.io or now != was:
+                words += [a, was, now]
+        a, was, now = SR2, 0, c.managed['mmr2']
+        if now != was:
+            words += [a, was, now]
         nums = [c.steps, int(halted(c)), len(words) // 3] + before + c.after + words
         out.append('\t// %d: %06o %s' % (i, c.ir, c.text))
         out.append('\t' + ', '.join(octal(v) if j > 2 else str(v) for j, v in enumerate(nums)) + ',')
@@ -556,7 +829,12 @@ def main():
         return
 
     rnd = random.Random(args.seed)
-    cases = systematic(rnd, args.scale) + scattered(rnd, args.n)
+    cases = systematic(rnd, args.scale) + managed(rnd, args.scale) + scattered(rnd, args.n)
+    # And one case in eight of the others with the unit on, its pages where
+    # their addresses say.
+    for c in cases:
+        if not c.io and rnd.random() < 0.125:
+            c.manage()
     version = run(args.simh, cases)
     kept = [c for c in cases if usable(c)]
     new = args.o + '.new.ogo'

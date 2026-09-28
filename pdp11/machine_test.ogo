@@ -57,13 +57,18 @@ func (b *bell) Granted(vector uint16) {
 }
 
 var (
-	tm   Machine
-	low  bell // at 164000, priority 4, vector 300
-	high bell // at 164002, priority 6, vector 310
+	tm       Machine
+	tmMemory [28 * 1024]uint16
+	low      bell // at 164000, priority 4, vector 300
+	high     bell // at 164002, priority 6, vector 310
 
 	bells   [maxDevices]bell
-	crowded Machine
+	crowded Machine // which has no memory, and needs none
 )
+
+func init() {
+	tm.Memory(tmMemory[:])
+}
 
 const (
 	lowAt  = 0o164000
@@ -111,10 +116,15 @@ func TestAttach(t *testing.T) {
 	ok = ok && !crowded.Attach(&bells[1], 0o177776, 4, 4) // past the end
 	ok = ok && !crowded.Attach(&bells[1], 0o177774, 4, 4) // over the status word
 	ok = ok && !crowded.Attach(&bells[1], 0o177570, 2, 4) // over the switch register
+	ok = ok && !crowded.Attach(&bells[1], 0o177572, 2, 4) // over SR0
+	ok = ok && !crowded.Attach(&bells[1], 0o177576, 2, 4) // over SR2
+	ok = ok && !crowded.Attach(&bells[1], 0o172276, 4, 4) // over the kernel's first page descriptor
+	ok = ok && !crowded.Attach(&bells[1], 0o177676, 2, 4) // over the user's last page address
+	ok = ok && crowded.Attach(&bells[1], 0o177574, 2, 4)  // SR1, which the 11/40 has not
 	ok = ok && !crowded.Attach(&bells[1], 0o160000, 2, 4) // over the first
 	ok = ok && !crowded.Attach(&bells[1], 0o160010, 2, 3) // no such priority
 	ok = ok && !crowded.Attach(&bells[1], 0o160010, 2, 8)
-	for i := 1; i < maxDevices; i++ {
+	for i := 2; i < maxDevices; i++ {
 		ok = ok && crowded.Attach(&bells[i], 0o160000+uint16(8*i), 4, uint16(4+i&3))
 	}
 	ok = ok && !crowded.Attach(&bells[0], 0o170000, 2, 4) // the bus is full
@@ -545,6 +555,75 @@ func TestNow(t *testing.T) {
 	}
 	if tm.Count != 1 || tm.Now()-before < 10 {
 		println("waiting, the machine has come", tm.Now()-before, "far, and counted", tm.Count)
+		t.Fail()
+	}
+}
+
+// mapped maps every page of both modes where its address says, as managed
+// of the vectors does, and turns the unit on.
+func mapped() {
+	managed(&tm)
+	tm.Deposit(statusReg, sr0Enable)
+}
+
+func TestMemoryManagement(t *testing.T) {
+	// The console reads and writes memory as it is on the bus, whatever the
+	// map says, and the registers of the unit above it.
+	fresh(nil)
+	mapped()
+	tm.Deposit(0o172340, 0o200) // the kernel's page 0 begins at 20000 on the bus
+	tm.Load(0o21000, []uint16{  // the program, at 1000 in the kernel's space
+		0o013700, 0o001234, // MOV @#1234, R0
+		0o012737, 0o004321, 0o001236, // MOV #4321, @#1236
+		0o000000, // HALT
+	})
+	tm.Deposit(0o21234, 0o5555)
+	tm.Deposit(0o1234, 0o6666)
+	v, ok := tm.Examine(0o172340)
+	if !ok || v != 0o200 {
+		printf("the page address register reads %06o %t\n", v, ok)
+		t.Fail()
+	}
+	v, ok = tm.Examine(statusReg)
+	expect(t, "SR0 examined", v, sr0Enable)
+	tm.Run(3)
+	expect(t, "what the program read through the map", tm.R[0], 0o5555)
+	v, _ = tm.Examine(0o21236)
+	expect(t, "what it wrote through the map", v, 0o4321)
+	v, _ = tm.Examine(0o1236)
+	expect(t, "the word beneath, which the console sees as it is", v, 0)
+	v, _ = tm.Examine(0o172300)
+	expect(t, "the descriptor with the page written to", v, 0o77506)
+	expect(t, "SR2, the address of the HALT", tm.sr2, 0o1012)
+
+	// A trap from the user's space takes its vector from the kernel's, and
+	// pushes on the kernel's stack in the kernel's space: the kernel's page
+	// 0 is at 20000 on the bus, the user's where it says.
+	fresh([]uint16{0o104000}) // EMT
+	mapped()
+	tm.Deposit(0o172340, 0o200)
+	tm.Deposit(0o20030, 0o4000) // the vector, on the bus
+	tm.Deposit(0o20032, 0o340)
+	tm.Deposit(0o24000, 0)   // HALT, in the kernel's space at 4000
+	tm.Deposit(0o30, 0o7777) // what the vector would be in the user's space
+	tm.SetPSW(0o140000)
+	tm.R[6] = 0o1700
+	tm.sp[kernel] = 0o700
+	tm.Run(2)
+	expect(t, "PC in the handler", tm.R[7], 0o4002)
+	expect(t, "the status word there", tm.PSW(), 0o030340)
+	expect(t, "the kernel's stack pointer", tm.R[6], 0o674)
+	v, _ = tm.Examine(0o20676)
+	expect(t, "the status word pushed, on the bus", v, 0o140000)
+	v, _ = tm.Examine(0o20674)
+	expect(t, "the program counter pushed", v, 0o1002)
+	v, _ = tm.Examine(0o676)
+	expect(t, "the user's word beneath the kernel's stack", v, 0)
+
+	// A machine is given at most what 18 bits reach, and one with none
+	// answers nothing.
+	if _, ok := crowded.Examine(0); ok || crowded.Deposit(0, 1) {
+		println("a machine without memory took a word")
 		t.Fail()
 	}
 }

@@ -17,8 +17,13 @@ const at = 0o177560
 var (
 	line    Line
 	machine pdp11.Machine
+	memory  [28 * 1024]uint16 // as much as SimH has, whose output is compared with
 	output  [512]byte
 )
+
+func init() {
+	machine.Memory(memory[:])
+}
 
 // expect fails the test unless got is want.
 func expect(t *testing.T, what string, got, want uint16) {

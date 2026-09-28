@@ -3,10 +3,12 @@
 // license that can be found in the LICENSE file.
 
 // Package pdp11 is a PDP-11/40: the KD11-A processor with the KE11-E extended
-// instruction set, its memory, and the bus its devices sit on.
+// instruction set and the KT11-D memory management, its memory, and the bus
+// its devices sit on.
 //
-// A Machine is stepped by one cog. Devices are attached before it runs; each
-// answers for a block of addresses in the I/O page and may ask for interrupts.
+// A Machine is stepped by one cog. It is given its memory and its devices
+// before it runs; a device answers for a block of addresses in the I/O page
+// and may ask for interrupts.
 // What a device does on other cogs is its own business: the machine talks to it
 // through the Device interface only, and only from the cog that steps the
 // machine.
@@ -15,9 +17,11 @@
 // it is given a package clause.
 
 const (
-	// MemWords is the size of memory in words: 28K, which is all there is below
-	// the I/O page while addresses are 16 bits wide.
-	MemWords = 28 * 1024
+	// MaxWords is the most memory a Machine takes, in words: 124K, which is
+	// all there is below the I/O page on a bus of 18 bits. A program reaches
+	// the first 28K of them without memory management and all of them with
+	// it, and a device on the bus reaches all of them.
+	MaxWords = ioBase / 2
 
 	// IOPage is the first address of the I/O page, the top 8 KB of the address
 	// space, where the registers of the devices and of the processor itself
@@ -103,7 +107,7 @@ type slot struct {
 }
 
 // A Machine is a processor with its memory and its bus. The zero Machine has
-// no devices and is ready to be Reset. It is large and must not be copied.
+// no memory and no devices and is ready to be Reset. It must not be copied.
 type Machine struct {
 	// R holds the general registers. R[6] is the stack pointer of the mode the
 	// processor is in and R[7] the program counter.
@@ -128,16 +132,42 @@ type Machine struct {
 	ndevices int
 	owner    [ioWords]uint8 // per word of the I/O page: its device's slot plus one
 
-	mem [MemWords]uint16
+	// Memory management: the status registers, the page registers of each
+	// mode and what they come to, and whose pages the next access goes
+	// through, which is the current mode's but for the moments an
+	// instruction reaches into the previous mode's space or a trap into the
+	// kernel's.
+	sr0   uint16
+	sr2   uint16
+	par   [4][8]uint16
+	pdr   [4][8]uint16
+	pages [4][8]page
+	space uint16
+
+	mem []uint16
+}
+
+// Memory gives the machine its memory, words of it from address 0 up and
+// MaxWords of them at most. What is more than that is not there, and a
+// machine that was given none has none.
+func (m *Machine) Memory(words []uint16) {
+	if len(words) > MaxWords {
+		words = words[:MaxWords]
+	}
+	m.mem = words
 }
 
 // Reset does what the START switch does: it resets the devices and clears the
-// registers, the status word and whatever was pending. Memory is left alone,
-// as core memory is.
+// registers, the status word, the status of the memory management and
+// whatever was pending. Memory is left alone, as core memory is, and so are
+// the page registers.
 func (m *Machine) Reset() {
 	clear(m.R[:])
 	clear(m.sp[:])
 	m.psw = 0
+	m.sr0 = 0
+	m.sr2 = 0
+	m.space = kernel
 	m.traps = attention
 	m.waiting = false
 	m.halted = false
@@ -165,7 +195,7 @@ func (m *Machine) Attach(d Device, base, size, priority uint16) bool {
 		return false
 	}
 	for a := uint32(base); a < uint32(base)+uint32(size); a += 2 {
-		if a == StatusWord || a == SwitchRegister || m.owner[(a-IOPage)/2] != 0 {
+		if processorRegister(uint16(a)) || m.owner[(a-IOPage)/2] != 0 {
 			return false
 		}
 	}
@@ -189,6 +219,14 @@ func (m *Machine) Attach(d Device, base, size, priority uint16) bool {
 	return true
 }
 
+// processorRegister reports whether the even address a in the I/O page is a
+// register of the processor's own: the status word, the switch register, or
+// one of the memory management's.
+func processorRegister(a uint16) bool {
+	return a == StatusWord || a == SwitchRegister || a == statusReg || a == addressReg ||
+		a>>6 == kernelPages>>6 || a>>6 == userPages>>6
+}
+
 // Now answers how far the machine has come, in instructions, as of when the
 // devices were last asked whether they want an interrupt, which they are
 // every pollEvery instructions at the least. A machine that waits for an
@@ -210,13 +248,20 @@ func (m *Machine) SetPSW(v uint16) {
 	m.setPSW(v)
 }
 
-// Examine reads the word at the address a as the console does: it goes through
-// the bus, so a device's register is read with whatever reading it does to the
-// device. It reports false for an odd address and for one nothing answers at.
+// Examine reads the word at the address a as the console does: memory as it is
+// on the bus, whatever the memory management maps, and the I/O page above it,
+// so a device's register is read with whatever reading it does to the device.
+// It reports false for an odd address and for one nothing answers at.
 func (m *Machine) Examine(a uint16) (uint16, bool) {
+	if a < IOPage {
+		if i := a >> 1; a&1 == 0 && i < uint16(len(m.mem)) {
+			return m.mem[i], true
+		}
+		return 0, false
+	}
 	pending := m.traps
 	m.traps = 0
-	v := m.read(a, 2)
+	v := m.readIO(a, 2)
 	ok := m.traps&aborts == 0
 	m.traps = pending | attention
 	return v, ok
@@ -225,9 +270,16 @@ func (m *Machine) Examine(a uint16) (uint16, bool) {
 // Deposit writes the word at the address a as the console does, and reports
 // false where Examine would.
 func (m *Machine) Deposit(a, v uint16) bool {
+	if a < IOPage {
+		if i := a >> 1; a&1 == 0 && i < uint16(len(m.mem)) {
+			m.mem[i] = v
+			return true
+		}
+		return false
+	}
 	pending := m.traps
 	m.traps = 0
-	m.write(a, 2, v)
+	m.writeIO(a, 2, v)
 	ok := m.traps&aborts == 0
 	m.traps = pending | attention
 	return ok
@@ -250,14 +302,14 @@ func (m *Machine) Load(a uint16, program []uint16) bool {
 //
 // Fetch and Store are for a device that moves data between memory and itself
 // without the processor, as a disk does. Such a device has an address of 18
-// bits, of which memory answers at those below the I/O page of a machine
-// without memory management. They are the only methods of a Machine that a
-// cog may call that does not step it: they touch nothing but memory, a word
-// at a time, as the device would that takes the bus between two cycles of
-// the processor.
+// bits, which is the bus's own and not one the memory management relocates,
+// and memory answers at as many of them as it has. They are the only methods
+// of a Machine that a cog may call that does not step it: they touch nothing
+// but memory, a word at a time, as the device would that takes the bus
+// between two cycles of the processor.
 func (m *Machine) Fetch(a uint32, p []byte) int {
 	n := 0
-	for i := a >> 1; n+1 < len(p) && i < MemWords; i++ {
+	for i := a >> 1; n+1 < len(p) && i < uint32(len(m.mem)); i++ {
 		v := m.mem[i]
 		p[n] = byte(v)
 		p[n+1] = byte(v >> 8)
@@ -271,7 +323,7 @@ func (m *Machine) Fetch(a uint32, p []byte) int {
 // ended.
 func (m *Machine) Store(a uint32, p []byte) int {
 	n := 0
-	for i := a >> 1; n+1 < len(p) && i < MemWords; i++ {
+	for i := a >> 1; n+1 < len(p) && i < uint32(len(m.mem)); i++ {
 		m.mem[i] = uint16(p[n]) | uint16(p[n+1])<<8
 		n += 2
 	}
