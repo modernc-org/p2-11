@@ -49,7 +49,7 @@ type Line struct {
 	head uint32 // bytes received, written by the receiving cog only
 	tail uint32 // bytes handed to the program, written by the machine's cog only
 
-	written uint32 // bytes the program wrote, written by the machine's cog only
+	written uint32 // bytes handed to the transmitter, written by the machine's cog only
 	sent    uint32 // bytes that left, written by the transmitting cog only
 
 	// Lost counts the bytes that arrived while the ring was full.
@@ -98,16 +98,19 @@ func (l *Line) Sent() {
 	l.sent++
 }
 
-// Reset is the Device method.
+// Reset is the Device method. It does not call back a byte that has been
+// handed to the transmitting cog, which may be half way out: the transmitter
+// is ready when that byte has left, and says so then.
 func (l *Line) Reset() {
 	if l.rxVector == 0 {
 		l.rxVector, l.txVector = 0o060, 0o064
 	}
 	l.rx = 0
-	l.tx = done
+	l.tx = 0
 	l.rxRequest = false
 	l.txRequest = false
 	l.tail = l.head // what was received and not read is gone
+	l.update()
 }
 
 // update brings the registers up to what the other two cogs have done since.
@@ -146,43 +149,43 @@ func (l *Line) Read(a uint16) uint16 {
 
 // Write is the Device method. What a program writes is in the lower byte of
 // each register, but writing either byte of the transmitter buffer sends what
-// the buffer then holds.
-//
-// Enabling interrupts while a status register says done requests one, and
-// disabling them withdraws the request.
+// the buffer then holds. There is one byte on its way at most: a program that
+// writes the buffer while the transmitter is busy overwrites what waits there,
+// if it still waits, as it would in a UART.
 func (l *Line) Write(a, v, mask uint16) {
 	l.update()
 	switch a & 6 {
 	case rcsr:
-		if mask&enable == 0 {
-			return
+		if mask&enable != 0 {
+			l.rx, l.rxRequest = control(l.rx, v, l.rxRequest)
 		}
-		switch {
-		case v&enable == 0:
-			l.rxRequest = false
-		case l.rx&(done|enable) == done:
-			l.rxRequest = true
-		}
-		l.rx = l.rx&^enable | v&enable
 	case xcsr:
-		if mask&enable == 0 {
-			return
+		if mask&enable != 0 {
+			l.tx, l.txRequest = control(l.tx, v, l.txRequest)
 		}
-		switch {
-		case v&enable == 0:
-			l.txRequest = false
-		case l.tx&(done|enable) == done:
-			l.txRequest = true
-		}
-		l.tx = l.tx&^enable | v&enable
 	case xbuf:
 		if mask&0xff != 0 {
 			l.out = v & 0xff
 		}
 		l.tx &^= done
 		l.txRequest = false
-		l.written++
+		if l.written == l.sent {
+			l.written++
+		}
 	}
+}
+
+// control answers a status register and its request after a program has
+// written v to the register. Enabling interrupts while the register says done
+// requests one, and disabling them withdraws the request.
+func control(csr, v uint16, request bool) (uint16, bool) {
+	switch {
+	case v&enable == 0:
+		request = false
+	case csr&(done|enable) == done:
+		request = true
+	}
+	return csr&^enable | v&enable, request
 }
 
 // Request is the Device method. The receiver goes first.

@@ -105,6 +105,46 @@ func TestTransmit(t *testing.T) {
 	expect(t, "the request that is left", line.Request(), 0o064)
 }
 
+// A reset does not call back a byte that has been handed to the transmitting
+// cog, so the transmitter is not ready until that byte has left.
+func TestResetWhileSending(t *testing.T) {
+	line.Reset()
+	line.Write(at+xbuf, 'A', 0xffff)
+	line.Reset()
+	expect(t, "transmitter status, reset with a byte on its way", line.Read(at+xcsr), 0)
+	if !line.Pending() {
+		println("the byte on its way is gone")
+		t.Fail()
+	}
+	expect(t, "the byte on its way", uint16(line.Next()), 'A')
+	line.Sent()
+	expect(t, "transmitter status, the byte gone", line.Read(at+xcsr), done)
+
+	line.Write(at+xbuf, 'B', 0xffff)
+	expect(t, "the byte written after the reset", uint16(line.Next()), 'B')
+	line.Sent()
+	if line.Pending() {
+		println("one byte was written after the reset and two are sent")
+		t.Fail()
+	}
+	expect(t, "transmitter status at the end", line.Read(at+xcsr), done)
+}
+
+// A program that writes while the transmitter is busy overwrites what waits
+// there, as it does in a UART. It does not make two bytes of one.
+func TestWriteWhileBusy(t *testing.T) {
+	line.Reset()
+	line.Write(at+xbuf, 'A', 0xffff)
+	line.Write(at+xbuf, 'B', 0xffff)
+	expect(t, "the byte that waits", uint16(line.Next()), 'B')
+	line.Sent()
+	if line.Pending() {
+		println("a second byte is sent")
+		t.Fail()
+	}
+	expect(t, "transmitter status", line.Read(at+xcsr), done)
+}
+
 func TestOverrun(t *testing.T) {
 	line.Reset()
 	line.Lost = 0
