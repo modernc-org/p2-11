@@ -27,11 +27,8 @@ const (
 	traffic = 20000
 	pace    = 40
 
-	// patience is how many milliseconds a test waits for the traffic. It has
-	// a type because what it is compared with is unsigned, and the compiler
-	// of 2026-09-27 compares such a number with an untyped constant as though
-	// it had a sign: OCTOGO.md, 1.
-	patience uint32 = 10000
+	// patience is how many milliseconds a test waits for the traffic.
+	patience = 10000
 )
 
 var (

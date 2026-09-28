@@ -15,7 +15,7 @@ operating system from yet.
 
 ```
 $ ogo run
-303004 instructions in 2672 ms, 113399 a second
+303004 instructions in 2519 ms, 120287 a second
 
 PDP-11/40 on a Propeller 2, in OctoGo
 28K words of memory
@@ -45,15 +45,15 @@ after it, on the board and on the machine the program is written on. A sweep of
 ## Running it
 
 It needs a Propeller 2 board and OctoGo. It was written with a P2 Edge module,
-P2-EC, and needs the `ogo` of 2026-09-27 or a later one:
+P2-EC, and needs the `ogo` of 2026-09-28 or a later one:
 
 ```sh
-go install modernc.org/ogo@458488c32397  # v0.43.1-0.20260927203343-458488c32397
+go install modernc.org/ogo@ed3022eabb19  # v0.43.1-0.20260928095216-ed3022eabb19
 ```
 
 ```sh
 ogo run                                  # build, load, and open a terminal
-ogo build --unchecked --clock 200MHz     # as fast as it goes: 155,068 a second
+ogo build --unchecked --clock 200MHz     # as fast as it goes: 167,962 a second
 ogo test ./...                           # the tests, on the board
 scripts/twin.sh                          # the packages' tests under Go, no board needed
 ```

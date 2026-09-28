@@ -37,7 +37,7 @@ What differs from Go and shapes this project:
 
 ### Which compiler
 
-The repository needs the `ogo` of 2026-09-27, `v0.43.1-0.20260927203343-458488c32397`, or a later one. `ogo` on PATH is installed from `../ogo` by the user and the agent there, and may lag the tree or be ahead of what this file knows. Do not install over it. To try the tree's compiler, build it somewhere of your own, which reads `../ogo` and changes nothing there:
+The repository needs the `ogo` of 2026-09-28, `v0.43.1-0.20260928095216-ed3022eabb19`, or a later one. `ogo` on PATH is installed from `../ogo` by the user and the agent there, and may lag the tree or be ahead of what this file knows. Do not install over it. To try the tree's compiler, build it somewhere of your own, which reads `../ogo` and changes nothing there:
 
 ```sh
 (cd ../ogo && go build -o "$SCRATCH/ogo-head" .)
@@ -45,7 +45,7 @@ The repository needs the `ogo` of 2026-09-27, `v0.43.1-0.20260927203343-458488c3
 
 Before a fault is reported, it is looked for with the tree's compiler: twice on 2026-09-27 what `ogo` on PATH did was already fixed there. And a compiler that is given a program to find a fault with is run under a cap, as `../ogo`'s own sweeps are, `ulimit -v 4000000` and `timeout -s KILL`: the tree's compiler of 2026-09-26 allocated without end on a shape this project wrote, and an uncapped run took the machine's memory.
 
-A build of this repository says nothing. One that warns has found something: `OCTOGO.md`, 1, is a wrong answer that came with a warning.
+A build of this repository says nothing. One that warns has found something: the unsigned number compared as a signed one, which `OCTOGO.md` has among what is closed, was a wrong answer that came with a warning.
 
 ## Commands
 
@@ -103,7 +103,7 @@ It is shared with the agent working in `../ogo`, and two loaders on one port cor
 | P60 | microSD chip select, flash clock |
 | P61 | microSD clock, flash chip select |
 
-The microSD slot was empty on 2026-09-27. The card agreed with the user is an SDHC of 4 to 32 GB, MBR with one FAT32 partition, holding image files with upper-case 8.3 names, each copied once onto the fresh filesystem so that it is contiguous. `TEST.DSK` on it is 4872 blocks of 512 bytes, each block filled with its own number as a little-endian 32-bit value.
+The microSD slot was empty on 2026-09-28. The user has 32 GB cards at hand and a 4 GB one on its way, and either will do: the card agreed with the user is an SDHC of 4 to 32 GB, MBR with one FAT32 partition, holding image files with upper-case 8.3 names, each copied once onto the fresh filesystem so that it is contiguous. `TEST.DSK` on it is 4872 blocks of 512 bytes, each block filled with its own number as a little-endian 32-bit value.
 
 ## Architecture
 
@@ -128,7 +128,7 @@ Only the root knows the Propeller 2. The others are Go once they have a package 
 
 **The order of things inside an instruction is the 11/40's**, down to what is left behind when an access fails halfway, and that is what the vectors hold the code to. SimH's `pdp11_cpu.c` was the reference for behaviour; nothing of it is copied.
 
-**The code is shaped by what a call costs** (`OCTOGO.md`, 3). `Run` fetches where it stands, `execute` finds the instruction's function, an operand in a register is dealt with where it is met, and `read`, `write` and `address` are called for operands in memory only. There are no helpers that only test something. Do not "tidy" that into small methods without measuring: the first version was written that way and ran a fifth as fast.
+**The code is shaped by what a call costs** (`OCTOGO.md`, 1). `Run` fetches where it stands, `execute` finds the instruction's function, an operand in a register is dealt with where it is met, and `read`, `write` and `address` are called for operands in memory only. There are no helpers that only test something. Do not "tidy" that into small methods without measuring: the first version was written that way and ran a fifth as fast.
 
 ## Tests
 
@@ -149,11 +149,11 @@ P2-EC, `mac/bench.mac`: 303,004 instructions, of which a third each are `ADD R2,
 
 | Build | Instructions a second |
 | --- | --- |
-| checked, 160 MHz | 113,399 |
-| `--unchecked`, 160 MHz | 124,131 |
-| `--unchecked --clock 200MHz` | 155,068 |
+| checked, 160 MHz | 120,287 |
+| `--unchecked`, 160 MHz | 134,369 |
+| `--unchecked --clock 200MHz` | 167,962 |
 
-In clocks at 160 MHz, `--unchecked`: a call and its return about 90 to 150; a field of the machine read and tested, 30 to 40; a `switch`, about 5 for every case it passes. A function with a branch in it is never inlined, and neither is one that names a constant. The measurements and their programs are in `OCTOGO.md`. Measure again after an `ogo` upgrade before relying on any of it: the three compilers of 2026-09-23 to 2026-09-27 agree to within 2%.
+In clocks at 160 MHz, `--unchecked`: a call and its return 75 to 115; a field of the machine read and tested, 30; a `switch`, about 5 for every case it passes. A function with a branch in it is never inlined. The measurements and their programs are in `OCTOGO.md`. Measure again after an `ogo` upgrade before relying on any of it: the compiler of 2026-09-28 made the emulator 6 to 8% faster by making a named constant its value, where the three before it had agreed to within 2%.
 
 Guest RAM as `[N]uint16` makes a word access one `rdword` or `wrword`. A 248 KB array at package scope builds and runs; it is part of the binary image, which is then 263 KB to load.
 
