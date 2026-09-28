@@ -88,28 +88,22 @@ func expect(t *testing.T, what string, got, want uint16) {
 }
 
 func TestAttach(t *testing.T) {
-	// The ogo of 2026-09-23 does not make an interface of an element's
-	// address where it is an argument, which the one of 2026-09-26 does. Until
-	// that is the one to be had, the address goes through a variable.
-	first, other := &bells[0], &bells[1]
-
 	var ok bool
-	ok = crowded.Attach(first, 0o160000, 2, 4)
-	ok = ok && !crowded.Attach(other, 0o157776, 2, 4) // below the I/O page
-	ok = ok && !crowded.Attach(other, 0o160011, 2, 4) // odd
-	ok = ok && !crowded.Attach(other, 0o160010, 3, 4) // an odd size
-	ok = ok && !crowded.Attach(other, 0o160010, 0, 4) // no size
-	ok = ok && !crowded.Attach(other, 0o177776, 4, 4) // past the end
-	ok = ok && !crowded.Attach(other, 0o177774, 4, 4) // over the status word
-	ok = ok && !crowded.Attach(other, 0o177570, 2, 4) // over the switch register
-	ok = ok && !crowded.Attach(other, 0o160000, 2, 4) // over the first
-	ok = ok && !crowded.Attach(other, 0o160010, 2, 3) // no such priority
-	ok = ok && !crowded.Attach(other, 0o160010, 2, 8)
+	ok = crowded.Attach(&bells[0], 0o160000, 2, 4)
+	ok = ok && !crowded.Attach(&bells[1], 0o157776, 2, 4) // below the I/O page
+	ok = ok && !crowded.Attach(&bells[1], 0o160011, 2, 4) // odd
+	ok = ok && !crowded.Attach(&bells[1], 0o160010, 3, 4) // an odd size
+	ok = ok && !crowded.Attach(&bells[1], 0o160010, 0, 4) // no size
+	ok = ok && !crowded.Attach(&bells[1], 0o177776, 4, 4) // past the end
+	ok = ok && !crowded.Attach(&bells[1], 0o177774, 4, 4) // over the status word
+	ok = ok && !crowded.Attach(&bells[1], 0o177570, 2, 4) // over the switch register
+	ok = ok && !crowded.Attach(&bells[1], 0o160000, 2, 4) // over the first
+	ok = ok && !crowded.Attach(&bells[1], 0o160010, 2, 3) // no such priority
+	ok = ok && !crowded.Attach(&bells[1], 0o160010, 2, 8)
 	for i := 1; i < maxDevices; i++ {
-		b := &bells[i]
-		ok = ok && crowded.Attach(b, 0o160000+uint16(8*i), 4, uint16(4+i&3))
+		ok = ok && crowded.Attach(&bells[i], 0o160000+uint16(8*i), 4, uint16(4+i&3))
 	}
-	ok = ok && !crowded.Attach(first, 0o170000, 2, 4) // the bus is full
+	ok = ok && !crowded.Attach(&bells[0], 0o170000, 2, 4) // the bus is full
 	if !ok {
 		println("Attach took what it should refuse, or refused what it should take")
 		t.Fail()
@@ -343,4 +337,117 @@ func TestFault(t *testing.T) {
 		println("the state with no stack for a trap:", int(s))
 		t.Fail()
 	}
+
+	// Of the two words a trap pushes the first may be what cannot be written.
+	// The second is then not written either.
+	fresh([]uint16{0o104000})
+	tm.Deposit(0o030, 0o2000)
+	tm.Deposit(0o032, 0o340)
+	tm.Deposit(0o157776, 0o123456)
+	tm.R[6] = 0o160002
+	tm.Step()
+	if s := tm.Step(); s != Faulted {
+		println("the state with half a stack for a trap:", int(s))
+		t.Fail()
+	}
+	v, _ := tm.Examine(0o157776)
+	expect(t, "the word below what could not be pushed", v, 0o123456)
+	tm.Deposit(0o157776, 0)
+}
+
+// An interrupt whose vector lets another one in is followed by that one
+// before an instruction is executed.
+func TestInterruptAtOnce(t *testing.T) {
+	fresh(nil)
+	tm.Deposit(0o312, 0)         // the high bell's interrupt runs at priority 0
+	tm.Deposit(0o3000, 0o000000) // and is HALT
+	tm.Deposit(0o2000, 0o000240) // the low bell's is NOP
+	low.ringing = true
+	high.ringing = true
+	if s := tm.Step(); s != Running {
+		println("the state after two interrupts and an instruction:", int(s))
+		t.Fail()
+	}
+	expect(t, "PC", tm.R[7], 0o2002)
+	expect(t, "SP, two interrupts deep", tm.R[6], 0o770)
+	if high.granted != 1 || low.granted != 1 {
+		println("granted: the high bell", high.granted, "the low bell", low.granted)
+		t.Fail()
+	}
+}
+
+// What Run answers does not depend on how many instructions it was given.
+func TestWaitState(t *testing.T) {
+	for n := uint32(1); n <= 3; n++ {
+		fresh([]uint16{0o000001}) // WAIT
+		if s := tm.Run(n); s != Waiting {
+			println("the state after WAIT, of", n, "instructions:", int(s))
+			t.Fail()
+		}
+		expect(t, "PC after WAIT", tm.R[7], 0o1002)
+		if tm.Count != 1 {
+			println("instructions counted:", tm.Count)
+			t.Fail()
+		}
+	}
+}
+
+// loop is a program with a subroutine, a stack and a trap in it, which runs
+// for 5205 instructions and halts: four, four hundred times thirteen, and the
+// HALT.
+var loop = [...]uint16{
+	0o012737, 0o001054, 0o000030, // 1000: MOV #1054, @#30
+	0o005037, 0o000032,           //           1006: CLR @#32
+	0o012700, 0o000620,           //           1012: MOV #400., R0
+	0o005001,                     //                     1016: CLR R1
+	0o004767, 0o000010,           //           1020: JSR PC, 1034
+	0o104001,                     //                     1024: EMT 1
+	0o077004,                     //                     1026: SOB R0, 1020
+	0o000000,                     //                     1030: HALT
+	0o000000,                     //
+	0o010046,                     //                     1034: MOV R0, -(SP)
+	0o060001,                     //                     1036: ADD R0, R1
+	0o006301,                     //                     1040: ASL R1
+	0o005501,                     //                     1042: ADC R1
+	0o111602,                     //                     1044: MOVB (SP), R2
+	0o074201,                     //                     1046: XOR R2, R1
+	0o005726,                     //                     1050: TST (SP)+
+	0o000207,                     //                     1052: RTS PC
+	0o005203,                     //                     1054: INC R3
+	0o000002,                     //                     1056: RTI
+}
+
+// A machine run in one go ends where one that is stepped ends.
+func TestRunAsSteps(t *testing.T) {
+	fresh(loop[:])
+	if s := tm.Run(1 << 20); s != Halted {
+		println("the state of the program that was run:", int(s))
+		t.Fail()
+	}
+	count := tm.Count
+	var r [8]uint16
+	copy(r[:], tm.R[:])
+	psw := tm.PSW()
+
+	fresh(loop[:])
+	s := Running
+	for i := 0; i < 1<<20 && s == Running; i++ {
+		s = tm.Step()
+	}
+	if s != Halted {
+		println("the state of the program that was stepped:", int(s))
+		t.Fail()
+	}
+	if tm.Count != count || count != 5205 {
+		println("instructions: run", count, "stepped", tm.Count, "want 5205")
+		t.Fail()
+	}
+	for i := 0; i < 8; i++ {
+		if tm.R[i] != r[i] {
+			printf("R%d: run %06o, stepped %06o\n", i, r[i], tm.R[i])
+			t.Fail()
+		}
+	}
+	expect(t, "the status word of the stepped one", tm.PSW(), psw)
+	expect(t, "R3, which counts the traps", tm.R[3], 400)
 }

@@ -8,16 +8,16 @@
 // bit, and the most urgent of those requested is taken before the next
 // instruction is.
 const (
-	trapOdd = 1 << iota // a word at an odd address
-	trapTimeout         // an address nothing answers at
-	trapJump            // a jump to a register
-	trapReserved        // an instruction this processor does not have
-	trapBPT             // the BPT instruction
-	trapIOT             // the IOT instruction
-	trapEMT             // the EMT instructions
-	trapTRAP            // the TRAP instructions
-	trapTrace           // an instruction executed with the trace bit set
-	trapStack           // the kernel's stack pointer below the limit
+	trapOdd      = 1 << iota // a word at an odd address
+	trapTimeout              // an address nothing answers at
+	trapJump                 // a jump to a register
+	trapReserved             // an instruction this processor does not have
+	trapBPT                  // the BPT instruction
+	trapIOT                  // the IOT instruction
+	trapEMT                  // the EMT instructions
+	trapTRAP                 // the TRAP instructions
+	trapTrace                // an instruction executed with the trace bit set
+	trapStack                // the kernel's stack pointer below the limit
 
 	trapCount = iota
 
@@ -50,21 +50,25 @@ var trapClears = [trapCount]uint16{
 	trapStack,
 }
 
-// due takes the traps that are requested and the interrupt that is due, and
-// reports false if one of them could not be taken.
+// due takes the traps that are requested and the interrupts that are due,
+// until there is nothing left but the next instruction, and reports false if
+// one of them could not be taken. An interrupt is followed by another at once
+// if the status word it brought lets the other in.
 func (m *Machine) due() bool {
-	for m.traps&^attention != 0 {
-		if !m.trap() {
+	for {
+		for m.traps&^attention != 0 {
+			if !m.trap() {
+				return false
+			}
+		}
+		v := m.request()
+		if v == 0 {
+			break
+		}
+		if !m.enter(v) {
 			return false
 		}
-	}
-	if !m.interrupt() {
-		return false
-	}
-	for m.traps&^attention != 0 { // its pushes may have run into the stack limit
-		if !m.trap() {
-			return false
-		}
+		m.stackCheck(m.R[6])
 	}
 	m.traps = 0
 	return true
@@ -73,9 +77,13 @@ func (m *Machine) due() bool {
 // enter takes a trap or an interrupt through the vector at v: the status word
 // and the program counter go on the stack of the mode the vector names, and
 // new ones come from the vector. It reports false when the vector could not be
-// read or the stack not written, which stops a real processor as well.
+// read or the stack not written, which stops a real processor as well, and it
+// stops at the first of the four accesses that fails.
 func (m *Machine) enter(v uint16) bool {
 	pc := m.read(v, 2)
+	if m.traps&aborts != 0 {
+		return false
+	}
 	psw := m.read(v+2, 2) & statusBits
 	if m.traps&aborts != 0 {
 		return false
@@ -86,6 +94,9 @@ func (m *Machine) enter(v uint16) bool {
 	m.sp[now] = m.R[6]
 	sp := m.sp[next]
 	m.write(sp-2, 2, old)
+	if m.traps&aborts != 0 {
+		return false
+	}
 	m.write(sp-4, 2, m.R[7])
 	if m.traps&aborts != 0 {
 		return false
@@ -119,10 +130,10 @@ func (m *Machine) trap() bool {
 	return true
 }
 
-// interrupt asks the devices, from the highest priority down, whether one
-// requests an interrupt the processor's priority admits, and takes the first.
-// It reports what enter does, and true if there was nothing to take.
-func (m *Machine) interrupt() bool {
+// request asks the devices, from the highest priority down, whether one
+// requests an interrupt the processor's priority admits. It grants the first
+// that does and answers its vector, or 0 if none does.
+func (m *Machine) request() uint16 {
 	level := (m.psw & priorityBits) >> 5
 	for i := 0; i < m.ndevices; i++ {
 		s := &m.devices[i]
@@ -131,14 +142,10 @@ func (m *Machine) interrupt() bool {
 		}
 		if v := s.dev.Request(); v != 0 {
 			s.dev.Granted(v)
-			if !m.enter(v) {
-				return false
-			}
-			m.stackCheck(m.R[6])
-			break
+			return v
 		}
 	}
-	return true
+	return 0
 }
 
 // stackCheck requests the stack trap if sp, which the kernel has just pushed

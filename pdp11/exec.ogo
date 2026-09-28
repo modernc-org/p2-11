@@ -72,6 +72,9 @@ func (m *Machine) Run(n uint32) State {
 			break
 		}
 	}
+	if state == Running && m.waiting {
+		state = Waiting // the last of the n was a WAIT
+	}
 	m.Count += all - n
 	return state
 }
@@ -177,6 +180,9 @@ func (m *Machine) control(ir uint16) {
 		m.traps |= attention
 	case 0o000002, 0o000006: // RTI, RTT
 		pc := m.read(m.R[6], 2)
+		if m.traps&aborts != 0 {
+			return
+		}
 		psw := m.read(m.R[6]+2, 2)
 		if m.traps&aborts != 0 {
 			return
