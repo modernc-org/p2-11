@@ -37,7 +37,7 @@ What differs from Go and shapes this project:
 
 ### Which compiler
 
-The repository needs the `ogo` of 2026-09-28, `v0.43.1-0.20260928095216-ed3022eabb19`, or a later one. `ogo` on PATH is installed from `../ogo` by the user and the agent there, and may lag the tree or be ahead of what this file knows. Do not install over it. To try the tree's compiler, build it somewhere of your own, which reads `../ogo` and changes nothing there:
+The repository needs `ogo` v0.44.0, of 2026-09-28, or a later one: `go install modernc.org/ogo@v0.44.0`. It is formatted as that formatter formats, which is as gofmt does. `ogo` on PATH is installed from `../ogo` by the user and the agent there, and may lag the tree or be ahead of what this file knows. Do not install over it. To try the tree's compiler, build it somewhere of your own, which reads `../ogo` and changes nothing there:
 
 ```sh
 (cd ../ogo && go build -o "$SCRATCH/ogo-head" .)
@@ -95,7 +95,7 @@ Bytes written into that pipe before the `\x1d` reach the program as console inpu
 
 ## The board
 
-One P2-EC Edge module (512 KB hub RAM, no PSRAM) behind a Parallax PropPlug on `/dev/ttyUSB0`. The user has allowed its use.
+One P2-EC Edge module (512 KB hub RAM, no PSRAM) behind a Parallax PropPlug on `/dev/ttyUSB0`, which is the name the port had on the machine the project began on. The user has allowed its use.
 
 It is shared with the agent working in `../ogo`, and two loaders on one port corrupt both runs. Run `fuser -s /dev/ttyUSB0` before every load. If the port is busy, say so and wait; never kill the other side's process, and never leave a loader holding the port.
 
@@ -111,6 +111,39 @@ It is shared with the agent working in `../ogo`, and two loaders on one port cor
 The microSD slot has a card since 2026-09-28: an SDHC of 32 GB, 62,333,952 blocks, which the program is loaded with in place as it was without. The card agreed with the user is an SDHC of 4 to 32 GB, MBR with one FAT32 partition, holding image files with upper-case 8.3 names, each copied once onto the fresh filesystem so that it is contiguous. `TEST.DSK` on it is 4872 blocks of 512 bytes, each block filled with its own number as a little-endian 32-bit value. On this card the partition begins at block 8192 and `TEST.DSK` at block 38720. The tests write to blocks of `TEST.DSK` and to no others, and put back what was there. The pack of drive 0 is the file `RK0.DSK`, and so on to `RK7.DSK`. `RK0.DSK` is on the card since 2026-09-28, from block 43616: RT-11 V4, as `guest/RK0.DSK` has it but for what the talks have written, which is what SimH writes to its copy.
 
 One load of about 130 on that day ended with the loader's `sendAddressSize: timeout`, and the twenty after it went well. Whether the card in the slot has to do with it is not known.
+
+## A new machine
+
+The work moved to another machine on 2026-09-28. What the repository does not hold, and a machine needs that is to go on with it:
+
+| What | Where it comes from |
+| --- | --- |
+| `ogo` v0.44.0 or later | the user installs it from `../ogo`, or `go install modernc.org/ogo@v0.44.0` |
+| Go, for `ogo` and the twin, which is built for 386 | the system; go1.27.1 was what there was |
+| python3, gcc, make and git, for the scripts and what they build; `fuser`, of psmisc | the system |
+| `tools/`, SimH and the assembler | `scripts/tools.sh`, which fetches and builds them |
+| `guest/`, the kit of RT-11 and `RK0.DSK` | the user carries it; the repository must not |
+| the port of the board | `/dev/ttyUSB0` where the project began, with the user in the group `dialout` |
+| what the assistant remembers | `~/.claude/projects/`, in the directory named after the path of the repository with dashes for slashes, `memory/`; the user carries it. What is needed of it is in this file. |
+
+`guest/RK0.DSK` is made of the kit so:
+
+```sh
+mkdir -p guest/rt11v4 && gzip -dc guest/rt11swre.tar.Z | tar -xf - -C guest/rt11v4
+cp guest/rt11v4/Disks/rtv4_rk.dsk guest/RK0.DSK && chmod 644 guest/RK0.DSK
+truncate -s 2494464 guest/RK0.DSK
+```
+
+That all is there is seen in this order, each of which says nothing or `ok`:
+
+```sh
+ogo version && ogo fmt -l . && ogo build
+scripts/twin.sh                    # with guest/ and tools/ there, the talk with RT-11 among it
+ogo test ./...                     # the card in the slot
+scripts/talk.py                    # RT-11 on the board and in SimH
+```
+
+What was left for where the card is: `ogo` v0.44.0 was measured without the card, so the tests of the card and of the disk with it, the talk on the board, and what a block of the card takes have not run with it. And `sd` still keeps the sixteen bytes it reads a card's size from in the `Card`, which it did because an error could not be returned that came of a call given a local buffer. It can since `ogo` c888892, and the bytes can be a local of `size` again, once there is a card to test that with.
 
 ## Architecture
 
@@ -131,7 +164,7 @@ Only the root and `sd` know the Propeller 2. The others are Go once they have a 
 
 **The disk** does a transfer on the cog of `Serve`, or on the machine's where no cog serves, which is how the tests of `rk11` run under the twin. A seek takes no time and ends when the controller has been looked at twice, the controller being ready before the drive as it is with an arm to move. A pack that cannot be read is the checksum error of the RK11, which a program tries again, and one that cannot be written its drive error. `mac/boot.mac` is the bootstrap, the project's own: it leaves in the registers what the bootstraps of a PDP-11 leave there for what a pack begins with.
 
-**Five cogs.** `main` steps the machine with `Machine.Run`. `receive` does nothing but read the serial line, since nothing is buffered behind `p2.ReadByte` and a byte arriving while the cog is elsewhere is lost. `transmit` writes it. `line` counts the cycles of the power line for the clock, `hz` of them a second, which is 60. It times each from when its second began, so that what one is late by is not added to the next, and in microseconds, a program having no way to ask how many clocks a second has (`OCTOGO.md`, 4). `turn` opens the card, puts the packs it finds in their drives, and then moves blocks between the card and memory as the controller orders.
+**Five cogs.** `main` steps the machine with `Machine.Run`. `receive` does nothing but read the serial line, since nothing is buffered behind `p2.ReadByte` and a byte arriving while the cog is elsewhere is lost. `transmit` writes it. `line` counts the cycles of the power line for the clock, `hz` of them a second, which is 60. It times each from when its second began, so that what one is late by is not added to the next, and in microseconds, which is good to one and forgives a cycle that is late. `turn` opens the card, puts the packs it finds in their drives, and then moves blocks between the card and memory as the controller orders.
 
 **Between cogs there is no lock and no channel.** Every variable two cogs share is written by one of them only: `dl11.Line` has a ring whose head the receiving cog writes and whose tail the machine's cog writes, and a count of bytes written by the program beside a count of bytes sent by the transmitting cog; `kw11.Clock` has a count of cycles the counting cog writes beside the count of them the register knows of; `rk11.Controller` has an order with its number, which the machine's cog writes, and a report with the number of the order it is of, which the cog of the disk writes. Memory is the exception, as it is on a bus that a device can take: the cog of the disk reads and writes words of it through `Machine.Fetch` and `Machine.Store`, while the program runs. A channel's rendezvous would stall the cog that reads the line.
 
@@ -174,11 +207,11 @@ P2-EC, `mac/bench.mac`: 303,004 instructions, of which a third each are `ADD R2,
 
 | Build | Instructions a second |
 | --- | --- |
-| checked, 160 MHz | 116,540 |
-| `--unchecked`, 160 MHz | 131,455 |
-| `--unchecked --clock 200MHz` | 164,318 |
+| checked, 160 MHz | 114,904 |
+| `--unchecked`, 160 MHz | 131,113 |
+| `--unchecked --clock 200MHz` | 163,874 |
 
-That is with the console, the clock and the disk on the bus, and the machine counting how far it has come. With the console alone the three ran 120,287, 134,369 and 167,962, with the console and the clock 119,811, 133,071 and 166,302, and with the disk as well and no count 116,629, 133,364 and 166,760. A device more to ask every `pollEvery` instructions costs about 1%, and so does where the build has put things: with the disk in the program and not on the bus the first two ran 117,762 and 131,912.
+That is with `ogo` v0.44.0, the console, the clock and the disk on the bus, and the machine counting how far it has come. With the compilers of the same day before it, the three ran 120,287, 134,369 and 167,962 with the console alone, 119,811, 133,071 and 166,302 with the console and the clock, 116,629, 133,364 and 166,760 with the disk as well, and 116,540, 131,455 and 164,318 with the count. A device more to ask every `pollEvery` instructions costs about 1%, and so does where the build has put things: with the disk in the program and not on the bus the first two ran 117,762 and 131,912.
 
 Sixty interrupts of the clock take 985 to 999 ms from when the program enables them, the first cycle being under way by then.
 
@@ -192,7 +225,7 @@ A block of the card, with its command and its checksum:
 | `--unchecked`, 160 MHz | 1239 |
 | `--unchecked --clock 200MHz` | 1050 |
 
-To write one takes 2.5 to 5 ms, most of which is the card's. All of `TEST.DSK` is read and compared in 9.6 s by the tests, which are built checked. With `settle` at 0, 1 or 2 the first thing of any length the card sends fails its checksum, at 160 MHz and at 200 MHz alike, and with 3 to 6 all of 500 blocks are read; it is 8. These were measured with `ogo` 3875205f89d4, whose compiler is that of ed3022eabb19, and the emulator's numbers are the same with both.
+To write one takes 2.5 to 5 ms, most of which is the card's. All of `TEST.DSK` is read and compared in 9.6 s by the tests, which are built checked. With `settle` at 0, 1 or 2 the first thing of any length the card sends fails its checksum, at 160 MHz and at 200 MHz alike, and with 3 to 6 all of 500 blocks are read; it is 8. These were measured with `ogo` 3875205f89d4, of the day before v0.44.0, as was the talk with RT-11: the card was not there when v0.44.0 was.
 
 In clocks at 160 MHz, `--unchecked`: a call and its return 75 to 115; a field of the machine read and tested, 30; a `switch`, about 5 for every case it passes. A function with a branch in it is never inlined. The measurements and their programs are in `OCTOGO.md`. Measure again after an `ogo` upgrade before relying on any of it: the compiler of 2026-09-28 made the emulator 6 to 8% faster by making a named constant its value, where the three before it had agreed to within 2%.
 
@@ -255,7 +288,8 @@ The programs in `mac/` are the project's own.
 - Code of general use, such as an SPI or SD driver and later video, is written as a package with no dependency on the emulator, so that it can move into OctoGo's standard library.
 - What a binary does is measured on the board before it is written down, with the `ogo version` and the clock it was measured at.
 - A test that fails is first suspected of being wrong itself. Of the differences from SimH met so far, one was the machine's, which counted an instruction it could not fetch as a step, and the rest were the test's: a generator that let a case reach SimH's console, a stale word of memory, an expectation miscounted.
-- The repository is private, and the user has delegated the timing of making it public. On 2026-09-28 what is missing is a tagged `ogo` release that builds it. Say so when all of these hold: LICENSE, AUTHORS and a README stating the status exist; the history holds no guest software and no personal data; the project builds with a tagged `ogo` release; and a stranger with a board can clone, `ogo run`, and watch a recognisable PDP-11 program at the terminal.
+- The repository is private, and the user has delegated the timing of making it public. Say so when all of these hold: LICENSE, AUTHORS and a README stating the status exist; the history holds no guest software and no personal data; the project builds with a tagged `ogo` release; and a stranger with a board can clone, `ogo run`, and watch a recognisable PDP-11 program at the terminal. They hold since `ogo` v0.44.0 of 2026-09-28, and the user was told so that day. The history has the review of 2026-09-27 with the paths of the machine it was written on, which the user knows of and keeps.
+- A commit is made when the user asks for one, and so is a push. The work is committed on a branch, in commits of one thing each, every one of which builds and passes the tests under the twin; `master` is fast-forwarded to the branch and pushed, and the branch deleted. Before anything is added, what would be added is looked at for guest software, for personal data and for the paths of this machine.
 
 ## License
 
@@ -271,5 +305,5 @@ Code taken from elsewhere keeps its own notice, and is recorded before it is com
 
 ## Open decisions
 
-- Whether the program is built `--unchecked` by those who run it. It is 13% faster.
+- Whether the program is built `--unchecked` by those who run it. It is 14% faster.
 - A lock shared with `../ogo` around board access, offered and not yet answered.

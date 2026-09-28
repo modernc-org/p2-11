@@ -16,8 +16,8 @@ There is no memory management yet, which Unix wants.
 
 ```
 $ ogo run
-303004 instructions in 2600 ms, 116540 a second
-60 cycles of the line clock in 992 ms
+303004 instructions in 2637 ms, 114904 a second
+60 cycles of the line clock in 988 ms
 
 PDP-11/40 on a Propeller 2, in OctoGo
 28K words of memory
@@ -37,11 +37,10 @@ has a file `RK0.DSK`, it begins with what is on that pack:
 
 ```
 RK0.DSK is the pack in drive 0
-
-303004 instructions in 2599 ms, 116584 a second
-60 cycles of the line clock in 997 ms
-
+...
 RT-11SJ  V04.00C
+
+.
 ```
 
 | | |
@@ -66,15 +65,15 @@ what it says in SimH, and leaves on the card what SimH leaves in its file.
 ## Running it
 
 It needs a Propeller 2 board and OctoGo. It was written with a P2 Edge module,
-P2-EC, and needs the `ogo` of 2026-09-28 or a later one:
+P2-EC, and needs `ogo` v0.44.0 or a later one:
 
 ```sh
-go install modernc.org/ogo@ed3022eabb19  # v0.43.1-0.20260928095216-ed3022eabb19
+go install modernc.org/ogo@v0.44.0
 ```
 
 ```sh
 ogo run                                  # build, load, and open a terminal
-ogo build --unchecked --clock 200MHz     # as fast as it goes: 164,318 a second
+ogo build --unchecked --clock 200MHz     # as fast as it goes: 163,874 a second
 ogo test ./...                           # the tests, on the board
 scripts/twin.sh                          # the packages' tests under Go, no board needed
 scripts/talk.py                          # a talk with what is on the pack, on the board and in SimH

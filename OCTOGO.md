@@ -5,17 +5,17 @@ language and its compiler lack is one of the things it is for. This file is
 where that is written down: what was met, the smallest program that shows it,
 what was measured, and what the emulator does about it meanwhile.
 
-Everything here was measured on a P2-EC at 160 MHz, with the `ogo` of
-2026-09-28, `v0.43.1-0.20260928095216-ed3022eabb19`. A number of clocks is
-good to within sixteen: what an access to hub RAM takes depends on where in
-memory the build has put things.
+Everything here was measured on a P2-EC at 160 MHz. The clocks are those of the
+`ogo` of 2026-09-28, `v0.43.1-0.20260928095216-ed3022eabb19`, and what the
+emulator runs at is that of `v0.44.0`. A number of clocks is good to within
+sixteen: what an access to hub RAM takes depends on where in memory the build
+has put things.
 
 An entry is removed when `ogo` no longer shows it and the emulator no longer
 works around it. What was found and is closed is at the end, by name.
 
-Of the five that are open, the first two are one: what the backend makes of the
-C it is given. A call is dear, and what is not inlined is called. The others
-are small, and none was measured on a board, there being nothing to measure.
+The two that are open are one: what the backend makes of the C it is given. A
+call is dear, and what is not inlined is called.
 
 ## 1. A function with a branch in it is called, and a call is dear
 
@@ -90,92 +90,7 @@ that has a branch in it, which by 1 is not inlined; and a function that calls
 one is in turn too large to be inlined itself.
 
 The emulator as it is now loses less to them, its checks being few a call:
-116,540 instructions a second checked and 131,455 unchecked.
-
-## 3. `ogo fmt` takes the indentation from the second line of an expression
-
-```go
-func f(a, b, c int) bool {
-	return a < b &&
-		b < c
-}
-```
-
-gofmt leaves that as it is. `ogo fmt` puts `b < c` under `return`, and does
-the same to an operand of `+` on a line of its own and to the second line of
-an `if`'s condition. What is built is the same; what is read is not.
-
-**Meanwhile:** the emulator has no expression of more than a line. The one it
-would have had, in `attach` of `main.ogo`, is an `if` and a `return`.
-
-## 4. A program cannot ask how fast its clock is
-
-The frequency is chosen where the program is built, with `--clock`, and `p2`
-has no name for it. What `p2` counts in clocks is of use to a program that
-knows how many of them a second has: `p2.GetCt`, `p2.WaitUntil` and
-`p2.WaitCycles`, and the periods a smart pin is given with `p2.WritePinX`, a
-bit of a serial line among them.
-
-```go
-import "p2"
-
-func main() {
-	next := p2.GetCt()
-	for {
-		next += 160000000 / 60 // at 160 MHz, and at no other frequency
-		p2.WaitUntil(next)
-		p2.PinToggle(56)
-	}
-}
-```
-
-**Meanwhile:** the cog that counts the cycles of the line clock times them in
-microseconds, with `p2.GetUs` and `p2.WaitUs`, which the backend's library
-makes of the frequency. That is good to a microsecond where the frequency is
-a whole number of MHz, and a cycle of a sixtieth of a second wants no better.
-`sd` waits a number of clocks for the card's bit, and the number is the one
-for the fastest clock there is.
-
-## 5. An error cannot be returned that comes of a call given a local buffer
-
-```go
-type failure struct {
-	what string
-}
-
-func (f *failure) Error() string {
-	return f.what
-}
-
-var errEmpty = failure{"nothing to fill"}
-
-func fill(p []byte) error {
-	if len(p) == 0 {
-		return &errEmpty
-	}
-	p[0] = 1
-	return nil
-}
-
-func first() (byte, error) {
-	var buf [16]byte
-	if err := fill(buf[:]); err != nil {
-		return 0, err
-	}
-	return buf[0], nil
-}
-```
-
-```
-main.ogo:22:13: cannot return local err, which holds a pointer into local buf: its storage does not outlive the function; declare buf at package scope
-```
-
-What `fill` returns is the address of a variable of the package or nothing,
-and never anything of `p`. It is the way a Go program reads into a buffer of
-its own and passes on what went wrong.
-
-**Meanwhile:** the sixteen bytes `sd` reads a card's size from are a field of
-the `Card`, not a local of the method that reads them.
+114,904 instructions a second checked and 131,113 unchecked.
 
 ## Found here and closed
 
@@ -186,3 +101,6 @@ the `Card`, not a local of the method that reads them.
 | `ogo fmt` and gofmt disagreed about the names of a constant block of which only the first has a value, about `for i := 0; ; i++`, and about the second line of a call's arguments. | 35dda36 |
 | An unsigned number of 32 bits ordered against a constant with a name and no type was compared as though it had a sign: for `a, b uint32 = 12000, 5000` and `const patience = 10000`, `b-a < patience` was true on the board. The backend warned, and built. | c8fd036 |
 | A named constant was an object of the C, read from hub RAM at every use, 10 clocks each, and a helper that named one was too large to be inlined, 112 clocks a call where the same helper with a literal took 40. The emulator gained 6% checked and 8% unchecked by it. | c8fd036 |
+| `ogo fmt` took the indentation from what continues a line: in `return a < b &&` with `b < c` on the next line, `b < c` came back under the `return`, and so an operand on a line of its own and the second line of a condition. | bfde4df |
+| A program could not ask how fast its clock is, which is chosen where it is built, with `--clock`. `p2.ClockFreq()` says: 160000000 on the board as built, and 200000000 built with `--clock 200MHz`. The emulator counts the cycles of its line clock in microseconds as before, which is good to one and forgives a cycle that is late. | d5af0c8 |
+| An error could not be returned that came of a call given a local buffer, `if err := fill(buf[:]); err != nil { return 0, err }`: "cannot return local err, which holds a pointer into local buf", of a `fill` that returns the address of a variable of the package or nothing. | c888892 |
