@@ -1,0 +1,177 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+import (
+	"testing"
+
+	"modernc.org/p2-11/mac"
+	"modernc.org/p2-11/pdp11"
+)
+
+// The clock by itself, this test being both cogs in turn, and then the clock
+// on the bus of a machine that runs a program.
+
+const lks = 0o177546
+
+var (
+	clock    Clock
+	machine  pdp11.Machine
+	attached bool
+)
+
+// expect fails the test unless got is want.
+func expect(t *testing.T, what string, got, want uint16) {
+	if got != want {
+		printf("%s %06o, want %06o\n", what, got, want)
+		t.Fail()
+	}
+}
+
+func TestRegister(t *testing.T) {
+	clock.Reset()
+	expect(t, "the register after a reset", clock.Read(lks), monitor)
+	expect(t, "the request after a reset", clock.Request(), 0)
+
+	// A program clears the bit, and cannot set it.
+	clock.Write(lks, 0, 0xffff)
+	expect(t, "the register, cleared", clock.Read(lks), 0)
+	clock.Write(lks, monitor, 0xffff)
+	expect(t, "the register, the bit written", clock.Read(lks), 0)
+
+	clock.Tick()
+	expect(t, "the register after a cycle", clock.Read(lks), monitor)
+	expect(t, "the request, interrupts not being enabled", clock.Request(), 0)
+
+	// There is nothing in the upper byte.
+	clock.Write(lks, 0, 0xff00)
+	expect(t, "the register, its upper byte written", clock.Read(lks), monitor)
+
+	// The lower byte is all of it.
+	clock.Write(lks, enable, 0x00ff)
+	expect(t, "the register, its lower byte written", clock.Read(lks), enable)
+}
+
+func TestRequest(t *testing.T) {
+	clock.Reset()
+
+	// Enabling the interrupt while the bit is set requests none.
+	clock.Write(lks, enable|monitor, 0xffff)
+	expect(t, "the register, enabled", clock.Read(lks), enable|monitor)
+	expect(t, "the request, no cycle having passed", clock.Request(), 0)
+
+	// A cycle does, and cycles nobody looked at are one.
+	clock.Tick()
+	clock.Tick()
+	clock.Tick()
+	expect(t, "the request after three cycles", clock.Request(), 0o100)
+	clock.Granted(0o100)
+	expect(t, "the request, granted", clock.Request(), 0)
+	expect(t, "the register, the interrupt taken", clock.Read(lks), enable|monitor)
+
+	// Disabling the interrupt withdraws the request, and so does clearing the
+	// bit.
+	clock.Tick()
+	expect(t, "the request after a cycle", clock.Request(), 0o100)
+	clock.Write(lks, monitor, 0xffff)
+	expect(t, "the request, disabled", clock.Request(), 0)
+	clock.Write(lks, enable|monitor, 0xffff)
+	clock.Tick()
+	expect(t, "the request after another", clock.Request(), 0o100)
+	clock.Write(lks, enable, 0xffff)
+	expect(t, "the request, the bit cleared", clock.Request(), 0)
+	expect(t, "the register at the end", clock.Read(lks), enable)
+
+	// A reset forgets the cycle that was not looked at.
+	clock.Tick()
+	clock.Reset()
+	expect(t, "the request after a reset", clock.Request(), 0)
+	expect(t, "the register after a reset", clock.Read(lks), monitor)
+
+	clock.Vector(0o104)
+	clock.Write(lks, enable, 0xffff)
+	clock.Tick()
+	expect(t, "the request through another vector", clock.Request(), 0o104)
+	clock.Vector(0o100)
+}
+
+// fresh answers a machine that has the clock and nothing else, reset, with
+// the program at its address and the program counter at start.
+func fresh(t *testing.T, at, start uint16, program []uint16) *pdp11.Machine {
+	if !attached {
+		attached = machine.Attach(&clock, lks, Size, 6)
+	}
+	if !attached || !machine.Load(at, program) {
+		println("no room on the bus, or none in memory")
+		t.Fail()
+	}
+	machine.Reset()
+	machine.R[7] = start
+	return &machine
+}
+
+// The program of mac/ticks.mac waits for sixty cycles and halts. Where it
+// halts, and with what, is where it halts in SimH.
+func TestTicks(t *testing.T) {
+	m := fresh(t, mac.TicksAt, mac.TicksStart, mac.Ticks[:])
+	cycles := 0
+	state := pdp11.Running
+	for i := 0; i < 1000 && state != pdp11.Halted; i++ {
+		state = m.Run(100)
+		if state == pdp11.Waiting {
+			clock.Tick()
+			cycles++
+		}
+	}
+	if state != pdp11.Halted || cycles != 60 {
+		println("the state is", int(state), "after", cycles, "cycles")
+		t.Fail()
+	}
+	expect(t, "R3", m.R[3], 60)
+	expect(t, "PC", m.R[7], 0o1046)
+	expect(t, "SP", m.R[6], 0o1000)
+	expect(t, "the status word", m.PSW(), 0o004)
+	expect(t, "the register", clock.Read(lks), 0)
+}
+
+// once waits for an interrupt of the clock, which counts it in R3, and halts.
+var once = [...]uint16{
+	0o012706, 0o001000,           // 1000: MOV #1000, SP
+	0o012737, 0o001034, 0o000100, // 1004: MOV #1034, @#100
+	0o012737, 0o000300, 0o000102, // 1012: MOV #300, @#102
+	0o005003,                     // 1020: CLR R3
+	0o012737, 0o000100, 0o177546, // 1022: MOV #100, @#177546
+	0o000001,                     // 1030: WAIT
+	0o000000,                     // 1032: HALT
+	0o005203,                     // 1034: INC R3
+	0o000002,                     // 1036: RTI
+}
+
+// A processor at the clock's priority or above it is not interrupted. The
+// cycles that pass meanwhile are one interrupt when the priority is lowered.
+func TestHeld(t *testing.T) {
+	for priority := uint16(0o300); priority <= 0o340; priority += 0o040 {
+		m := fresh(t, 0o1000, 0o1000, once[:])
+		m.SetPSW(priority)
+		for i := 0; i < 3; i++ {
+			if s := m.Run(100); s != pdp11.Waiting {
+				println("the state is", int(s), "with", i, "cycles passed")
+				t.Fail()
+			}
+			clock.Tick()
+		}
+		expect(t, "R3, the processor not interrupted", m.R[3], 0)
+		expect(t, "the register", clock.Read(lks), enable|monitor)
+
+		m.SetPSW(0o240)
+		if s := m.Run(100); s != pdp11.Halted {
+			println("the state is", int(s), "with the priority lowered")
+			t.Fail()
+		}
+		expect(t, "R3", m.R[3], 1)
+		expect(t, "PC", m.R[7], 0o1034)
+		expect(t, "SP", m.R[6], 0o1000)
+		expect(t, "the status word", m.PSW(), 0o240)
+		expect(t, "the request when all is done", clock.Request(), 0)
+	}
+}

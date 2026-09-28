@@ -1,0 +1,29 @@
+; Copyright 2026 The p2-11 Authors. All rights reserved.
+; Use of this source code is governed by a BSD-style
+; license that can be found in the LICENSE file.
+
+	.title	ticks
+
+; A second by the line clock: it waits for sixty cycles of the line, the clock
+; interrupting for each, and halts with the count in r3.
+
+	.asect
+	.=1000
+
+	lks	= 177546		; the clock's register
+
+start:	mov	#start, sp
+	mov	#tick, @#100
+	mov	#300, @#102		; at priority 6, the clock's own
+	clr	r3
+	mov	#100, @#lks		; interrupts on, and the cycle that was is forgotten
+1$:	wait
+	cmp	r3, #60.
+	blo	1$
+	clr	@#lks
+	halt
+
+tick:	inc	r3
+	rti
+
+	.end	start

@@ -1,0 +1,111 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package kw11 is the KW11-L line time clock: one register, at 177546, of
+// which every cycle of the power line sets a bit, and an interrupt for it
+// through 100 at priority 6. It is what an operating system keeps the time by.
+//
+// A Clock is shared by two cogs, and no lock is needed between them because
+// each of the two variables they share is written by one of them only. The cog
+// that steps the machine owns the register. The cog that counts the cycles of
+// the line calls Tick and owns the count.
+//
+// Nothing here knows about the Propeller 2, nor how long a cycle is: what
+// counts them is the program's.
+
+const (
+	// Size is how many bytes of the I/O page a Clock takes.
+	Size = 2
+
+	// The bits of the register, of which a program writes the first and
+	// clears the second.
+	enable  = 1 << 6 // interrupt enable
+	monitor = 1 << 7 // a cycle of the line has passed
+)
+
+// A Clock is one KW11-L. The zero Clock is ready to be attached; Reset brings
+// it to the state it powers up in.
+type Clock struct {
+	csr     uint16
+	request bool // the clock requests an interrupt
+
+	ticks uint32 // cycles of the line, written by the cog that counts them only
+	seen  uint32 // of which the register knows, written by the machine's cog only
+
+	vector uint16
+}
+
+// Vector says which vector the clock interrupts through. It is 100 for a
+// Clock not told otherwise.
+func (c *Clock) Vector(v uint16) {
+	c.vector = v
+}
+
+// Tick says a cycle of the line has passed. It is what the cog that counts
+// them calls, and that cog only.
+func (c *Clock) Tick() {
+	c.ticks++
+}
+
+// Reset is the Device method. The cycles that passed and were not looked at
+// are gone.
+func (c *Clock) Reset() {
+	if c.vector == 0 {
+		c.vector = 0o100
+	}
+	c.csr = monitor
+	c.request = false
+	c.seen = c.ticks
+}
+
+// update brings the register up to what the other cog has done since. Cycles
+// that passed since the register was last looked at are one to it, as they
+// are to a bit that is already set.
+func (c *Clock) update() {
+	if t := c.ticks; t != c.seen {
+		c.seen = t
+		c.csr |= monitor
+		if c.csr&enable != 0 {
+			c.request = true
+		}
+	}
+}
+
+// Read is the Device method.
+func (c *Clock) Read(a uint16) uint16 {
+	c.update()
+	return c.csr
+}
+
+// Write is the Device method. A program enables the interrupt and disables
+// it, and clears the bit a cycle has set, which it cannot set. Enabling the
+// interrupt requests none: the next cycle does.
+func (c *Clock) Write(a, v, mask uint16) {
+	c.update()
+	if mask&0xff == 0 {
+		return // there is nothing in the upper byte
+	}
+	c.csr = c.csr&^enable | v&enable
+	if v&monitor == 0 {
+		c.csr &^= monitor
+	}
+	if c.csr&enable == 0 || c.csr&monitor == 0 {
+		c.request = false
+	}
+}
+
+// Request is the Device method.
+func (c *Clock) Request() uint16 {
+	c.update()
+	if c.request {
+		return c.vector
+	}
+	return 0
+}
+
+// Granted is the Device method. The bit the cycle has set stays set: clearing
+// it is the program's.
+func (c *Clock) Granted(vector uint16) {
+	c.request = false
+}
