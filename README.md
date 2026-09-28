@@ -1,3 +1,5 @@
+![p2-11](logo.svg)
+
 # p2-11
 
 A PDP-11/40 on a [Parallax Propeller 2](https://www.parallax.com/propeller-2/),
@@ -93,7 +95,7 @@ scripts/card.py put RK0.DSK RK0.DSK      # a pack onto the card, through the boa
 | [card](card) | a second program: puts a file onto the card and sums one there, over the serial line |
 | [fat](fat) | where on a disk a file of its FAT32 volume is |
 | [mac](mac) | the PDP-11 programs it carries, in MACRO-11 and assembled |
-| [scripts](scripts) | what makes the test vectors, assembles the programs, and runs the tests under Go |
+| [scripts](scripts) | what makes the test vectors, assembles the programs, runs the tests under Go, and draws the logo |
 
 The cogs share memory and no lock: every variable two of them share is
 written by one of them only.

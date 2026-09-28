@@ -92,6 +92,7 @@ Bytes written into that pipe before the `\x1d` reach the program as console inpu
 | `pdp11/vectors_test.ogo` | `scripts/vectors.py` | SimH, one to two minutes |
 | `mac/demo.ogo`, and so on for every `.mac` | `scripts/mac.py mac/demo.mac` | the MACRO-11 source beside it |
 | `mac/disk_table.ogo` | `scripts/rk.py` | SimH running `mac/disk.mac` with two packs the script makes, a second |
+| `logo.svg` | `scripts/logo.py` | nothing: the name drawn as strokes, its ones the toggle switches of a front panel |
 
 `scripts/tools.sh` fetches and builds SimH and the macro11 assembler into `tools/`, which git ignores, each at the revision the repository's files were made with. Nothing needs them but these three scripts. Made again with the same tools and arguments, the files come out as they are.
 
@@ -309,6 +310,8 @@ BSD-3-Clause: the text of `../ogo/LICENSE` under "The p2-11 Authors", who are li
 ```
 
 Code taken from elsewhere keeps its own notice, and is recorded before it is committed. The preference is to write from the DEC handbooks and to use other emulators as a reference for behaviour only.
+
+The logo, `logo.svg`, is the project's own drawing, which `scripts/logo.py` makes of strokes: no typeface is in it, and nothing of DEC's or Parallax's marks, so that there is nothing in it to be too like what is someone's. The user said on 2026-09-28 that a logo matters little, and that being safe so is all that matters about one.
 
 ## Open decisions
 

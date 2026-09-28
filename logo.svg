@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 476 198" width="476" height="198" role="img" aria-label="p2-11">
+  <title>p2-11</title>
+  <rect width="476" height="198" rx="22" fill="#231e2b"/>
+  <g transform="translate(44,28)" fill="none" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M8,30 V130" stroke="#ece6d8"/><circle cx="43" cy="65" r="35" stroke="#ece6d8"/><path d="M112,40 A30,30 0 0 1 172,40 C172,64 142,78 114,100 L172,100" stroke="#ece6d8"/><path d="M204,60 H234" stroke="#ece6d8"/><path d="M266,100 H306" stroke="#d94f70"/><path d="M286,100 V28" stroke="#d94f70"/><circle cx="286" cy="26" r="14" fill="#d94f70" stroke="none"/><path d="M340,100 H380" stroke="#d94f70"/><path d="M360,100 V28" stroke="#d94f70"/><circle cx="360" cy="26" r="14" fill="#d94f70" stroke="none"/>
+  </g>
+</svg>
