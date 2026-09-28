@@ -10,12 +10,13 @@ PDP-11.
 
 ## Status
 
-Early. The processor, the console, the line clock and the disk are there, and
-nothing has been booted from the disk yet.
+Early. The processor, the console, the line clock and the disk are there.
+Where the emulator runs under Go, RT-11 V4 begins on it and does what it does
+in SimH. On the board it has not begun yet.
 
 ```
 $ ogo run
-303004 instructions in 2598 ms, 116629 a second
+303004 instructions in 2600 ms, 116540 a second
 60 cycles of the line clock in 992 ms
 
 PDP-11/40 on a Propeller 2, in OctoGo
@@ -61,7 +62,7 @@ go install modernc.org/ogo@ed3022eabb19  # v0.43.1-0.20260928095216-ed3022eabb19
 
 ```sh
 ogo run                                  # build, load, and open a terminal
-ogo build --unchecked --clock 200MHz     # as fast as it goes: 166,760 a second
+ogo build --unchecked --clock 200MHz     # as fast as it goes: 164,318 a second
 ogo test ./...                           # the tests, on the board
 scripts/twin.sh                          # the packages' tests under Go, no board needed
 ```

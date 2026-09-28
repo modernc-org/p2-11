@@ -90,7 +90,7 @@ that has a branch in it, which by 1 is not inlined; and a function that calls
 one is in turn too large to be inlined itself.
 
 The emulator as it is now loses less to them, its checks being few a call:
-119,811 instructions a second checked and 133,071 unchecked.
+116,540 instructions a second checked and 131,455 unchecked.
 
 ## 3. `ogo fmt` takes the indentation from the second line of an expression
 

@@ -10,7 +10,7 @@ p2-11 is a PDP-11 emulator for the Parallax Propeller 2 (P2), written in OctoGo.
 2. To find what OctoGo is missing or gets wrong. What was found is in `OCTOGO.md`.
 3. Fun.
 
-**Status, 2026-09-28.** The processor, the console and the line clock exist. A program on the board says what it is, sizes memory by trapping, and echoes what is typed with the receiver interrupting; another waits for sixty interrupts of the clock, which take a second. The processor agrees with SimH's 11/40 on every one of the 2380 cases in the repository and of the 15,685 of a sweep. The disk controller exists, with files on the SD card for its packs, and does on the board what SimH's does with a program of 35 steps. Nothing has been booted from it: there was no pack with a system on it on the day. There is no memory management. Keep this file in step as code lands, and delete what stops being true.
+**Status, 2026-09-28.** The processor, the console and the line clock exist. A program on the board says what it is, sizes memory by trapping, and echoes what is typed with the receiver interrupting; another waits for sixty interrupts of the clock, which take a second. The processor agrees with SimH's 11/40 on every one of the 2380 cases in the repository and of the 15,685 of a sweep. The disk controller exists, with files on the SD card for its packs, and does on the board what SimH's does with a program of 35 steps. Under the twin the machine begins with RT-11 V4 on a pack, and says in a talk of nine commands what SimH says, and leaves the pack as SimH leaves it. On the board it has not begun with anything: the pack was not on the card on the day. There is no memory management. Keep this file in step as code lands, and delete what stops being true.
 
 ## OctoGo
 
@@ -60,6 +60,7 @@ ogo test -run TestDemo ./dl11      # only the tests whose name matches
 ogo test -c ./pdp11                # build the tests only, no board needed
 scripts/twin.sh                    # the tests of the packages under Go, on this machine, 1 s
 scripts/twin.sh -run Vectors ./pdp11
+scripts/twin.sh -v -run RT11 ./rk11 # the talk with RT-11, if guest/RK0.DSK and SimH are there
 ```
 
 `build` and `run` take `--unchecked` (no runtime checks), `--release` (reboot on a panic instead of halting the cog), `--clock 200MHz` (the default is 160 MHz, and 201 MHz is the most the compiler will ask for) and `--gostack N`. `test` takes `--clock`, `--gostack` and `-p port`.
@@ -137,6 +138,8 @@ Only the root and `sd` know the Propeller 2. The others are Go once they have a 
 
 **A pin is the cog's that drives it.** What the cogs drive is ORed, so a pin one cog holds high is not another's to pull low. The card is opened by the cog that uses it, `turn`, and a test that uses the card on its own cog closes it, which lets go of the pins.
 
+**Time is counted in instructions** where a device has none of its own. `Machine.Now` says how far the machine has come, a machine that waits coming as far as one that runs, and the console hands the program what has arrived no closer together than `apart` instructions, 1000 as in SimH. Without that RT-11 took a line that was sent at once the wrong way round: its receiver's interrupt goes on at priority 0 after ten instructions, and counts on the next character taking a character's time. A terminal at 230400 baud leaves it five instructions.
+
 **Traps** are bits in `Machine.traps`, the most urgent lowest. An access that fails requests one and reads as zero, there being nothing to unwind with, and what follows asks `m.traps&aborts != 0` before it does anything else: before the instruction changes anything, and before the next access of a sequence, a trap's two pushes among them. `attention` is a bit among the traps that is no trap: whatever needs the instructions to stop following one another for a moment sets it, so that the loop in `Run` tests one word.
 
 **The order of things inside an instruction is the 11/40's**, down to what is left behind when an access fails halfway, and that is what the vectors hold the code to. SimH's `pdp11_cpu.c` was the reference for behaviour; nothing of it is copied.
@@ -149,6 +152,7 @@ Only the root and `sd` know the Propeller 2. The others are Go once they have a 
 - **By hand**: `pdp11/machine_test.ogo` for the bus, interrupts, the console's switches, what `Run` answers and that a program run ends where the same program stepped ends, with a device of its own; `dl11/dl11_test.ogo` for the line by itself and for the line as console of a machine that runs `mac/demo.mac`, whose output is compared with what it says in SimH; `kw11/kw11_test.ogo` for the clock by itself and for the clock on a machine, which runs `mac/ticks.mac` to where it ends in SimH, and keeps the cycles that pass while the processor's priority holds them back for one interrupt, as SimH does.
 - **The card**: `fat/fat_test.ogo` finds files on a disk that is made up block by block as it is read, with a directory in two clusters that are not neighbours and files in one piece and in several, under the twin and on the board. `sd/sd_test.ogo` reads the card in the slot and writes nothing. `card_test.ogo` in the root reads all of `TEST.DSK` and compares it, and writes seventeen blocks of it, reads them and puts back what they had. The last two run on the board only, and pass on a board with no card, or no such file, saying that nothing was tested.
 - **The disk**: `mac/disk.mac` has the controller do 35 things, among them every function, every error a program can cause, interrupts, and registers written a byte at a time, and writes the registers after each into a table. `scripts/rk.py` has SimH make that table, and `rk11/rk11_test.ogo` compares: with the controller doing the transfers itself, and with the test as the cog of the disk after every 1, 7, 49 and 343 instructions. What the program cannot ask is tested by hand: a pack that fails, a drive that is busy, a pack taken out, and the bootstrap, which leaves in SimH what it leaves here. `disk_test.ogo` in the root runs the program with the cog of the disk and `TEST.DSK` on the card, on the board only.
+- **A system**: `rk11/host_test.go` is Go, for the twin only, and is skipped where `guest/RK0.DSK` or SimH is not. It has the machine begin with the pack and holds a talk with RT-11 in which a file is copied, compared and deleted, has SimH do the same, and compares what the two consoles said and what the two packs then hold. Each command waits for the prompt after the one before it, so that nothing is typed into what the system says. It found the console's pace, which no test of the project's own programs had: they wait for a character and have done with it before the next.
 - **Between cogs**, `cogs_test.ogo` in the root: 20,000 bytes each way through the console with the cog of the other end running at once, and resets with a byte on its way; and the clock with the program's own cog counting, by which `mac/ticks.mac` is to take a second. The tests of `dl11` are one cog taking the part of three in turn; this is the only place that asks whether a cog sees what another wrote, in the order it was written. It runs on the board only.
 - **A sweep** is a larger table made elsewhere and run under the twin only: `scripts/vectors.py -n 12000 -scale 2 -o FILE` takes a quarter of an hour; put FILE in place of `pdp11/vectors_test.go`, under a package clause, in a twin kept with `scripts/twin.sh -k DIR`, and run `GOARCH=386 go test ./pdp11` there.
 
@@ -166,11 +170,11 @@ P2-EC, `mac/bench.mac`: 303,004 instructions, of which a third each are `ADD R2,
 
 | Build | Instructions a second |
 | --- | --- |
-| checked, 160 MHz | 116,629 |
-| `--unchecked`, 160 MHz | 133,364 |
-| `--unchecked --clock 200MHz` | 166,760 |
+| checked, 160 MHz | 116,540 |
+| `--unchecked`, 160 MHz | 131,455 |
+| `--unchecked --clock 200MHz` | 164,318 |
 
-That is with the console, the clock and the disk on the bus. With the console alone the three ran 120,287, 134,369 and 167,962, and with the console and the clock 119,811, 133,071 and 166,302. A device more to ask every `pollEvery` instructions costs about 1%, and so does where the build has put things: with the disk in the program and not on the bus the first two ran 117,762 and 131,912.
+That is with the console, the clock and the disk on the bus, and the machine counting how far it has come. With the console alone the three ran 120,287, 134,369 and 167,962, with the console and the clock 119,811, 133,071 and 166,302, and with the disk as well and no count 116,629, 133,364 and 166,760. A device more to ask every `pollEvery` instructions costs about 1%, and so does where the build has put things: with the disk in the program and not on the bus the first two ran 117,762 and 131,912.
 
 Sixty interrupts of the clock take 985 to 993 ms from when the program enables them, the first cycle being under way by then.
 
@@ -210,7 +214,7 @@ What there is of it:
 | DL11 console | done |
 | KW11-L line clock | done |
 | the SD card, and a file's place on its FAT32 volume | done |
-| RK11 disk controller, with files on the card for packs | done; nothing has been booted from it |
+| RK11 disk controller, with files on the card for packs | done; RT-11 V4 begins on it under the twin, and on the board nothing has yet |
 | KT11-D memory management, 248 KB | not started |
 | FIS, the floating point processor | not planned: their instructions trap as on a machine without them |
 
@@ -232,6 +236,8 @@ No disk image, ROM dump or other guest software is committed, whatever its licen
 
 - DEC software (RT-11, RSX-11, RSTS/E, the diagnostics) is not redistributable. The Mentec hobbyist license grants use "solely for personal, non-commercial uses in conjunction with the EMULATOR" and defines that emulator as "software owned by Digital Equipment Corporation", so by its letter it does not cover this one. Do not download DEC software unasked; whether and which kit to use is the user's decision.
 - Research Unix V1 to V7 is under the Caldera license, a 4-clause BSD license with an advertising clause. It may be fetched, and redistributed with its notice.
+
+What is in `guest/` since 2026-09-28, put there by the user: `rt11swre.tar.Z`, RT-11 V4 on RK05 from SimH's software kits, with the license quoted above. `guest/rt11v4/` is the kit unpacked, whose `rtv4_rk.dsk` is of 3267 blocks, and `guest/RK0.DSK` that pack made a whole one, 2,494,464 bytes, which is what goes to the card. SimH begins with it as an 11/40 without memory management and 28K words: RT-11SJ V04.00C.
 
 The programs in `mac/` are the project's own.
 
@@ -258,6 +264,5 @@ Code taken from elsewhere keeps its own notice, and is recorded before it is com
 
 ## Open decisions
 
-- Whether the program is built `--unchecked` by those who run it. It is 14% faster.
-- Which RT-11 to begin with. Advised on 2026-09-28: RT-11 V4 on RK05 from SimH's software kits, `rt11swre.tar.Z`, whose `rtv4_rk.dsk` SimH boots with `att rk0` and `boot rk0`. SimH's document says it is licensed "for non-commercial use ONLY ON THIS SIMULATOR". The user looks for it, and it goes to `guest/`.
+- Whether the program is built `--unchecked` by those who run it. It is 13% faster.
 - A lock shared with `../ogo` around board access, offered and not yet answered.
