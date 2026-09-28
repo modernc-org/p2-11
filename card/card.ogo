@@ -1,0 +1,263 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Command card puts a file of the machine the board is plugged into onto the
+// SD card in the slot, and sums what a file there holds, over the serial
+// line: a pack goes onto the card, and is checked, without the card coming
+// out. scripts/card.py is the other end, and what is run.
+//
+// The host speaks in lines, and the program answers in lines:
+//
+//	file NAME     the file on the card that what follows is about; answered
+//	              with "file NAME BLOCKS blocks from BLOCK", or "error: WHAT"
+//	block N SUM   followed by the 512 bytes of block N of the file, escaped;
+//	              answered with "ok N" when the block is on the card, "bad N"
+//	              when the bytes do not sum to SUM, or "error N: WHAT"
+//	sum           answered with "sum N SUM" for every block of the file, and
+//	              then "done"
+//	quit          answered with "bye"
+//
+// A sum is the Fletcher-32 checksum of a block, in hexadecimal. The bytes of
+// a block are sent as they are, but for the three the loader's terminal would
+// take for itself, which come after an escape with a bit flipped. The host
+// may have a few blocks on their way at once: what the line brings waits in
+// a ring for the cog that writes the card, which is why there are two cogs.
+
+import (
+	"p2"
+
+	"modernc.org/p2-11/fat"
+	"modernc.org/p2-11/sd"
+)
+
+// The pins of the slot.
+const (
+	cardClock  = 61
+	cardSelect = 60
+	cardIn     = 59
+	cardOut    = 58
+)
+
+const (
+	// ringSize is how many bytes may wait between the cog that reads the
+	// line and the one that writes the card: the blocks the host has on
+	// their way, escaped and with their headers. It is a power of two so
+	// that an index wraps by a mask.
+	ringSize = 8192
+
+	// escape comes before a byte the loader's terminal would take for
+	// itself, Ctrl-] and Ctrl-Z ending the terminal, and before an escape
+	// that is data; the byte follows with flip applied to it.
+	escape = 0x1b
+	flip   = 0x40
+
+	// lineSize is the most a line of the host has.
+	lineSize = 64
+)
+
+var (
+	card   sd.Card
+	volume fat.Volume
+	file   fat.File // the file the host has named
+	named  bool
+
+	ring [ringSize]byte
+	head int // bytes read from the line, written by the reading cog only
+	tail int // bytes taken from the ring, written by main only
+
+	line [lineSize]byte
+	name [lineSize]byte // the file's name, for a string over it
+	data [sd.BlockSize]byte
+)
+
+// receive reads the serial line and does nothing else, because a byte that
+// arrives while the cog is elsewhere is lost.
+func receive() {
+	for {
+		ring[head&(ringSize-1)] = byte(p2.ReadByte(0))
+		head++
+	}
+}
+
+// next answers the next byte from the line, when it has come.
+func next() byte {
+	for tail == head {
+	}
+	b := ring[tail&(ringSize-1)]
+	tail++
+	return b
+}
+
+// readLine reads a line into line and answers how long it is. A carriage
+// return is left out, and so is what does not fit.
+func readLine() int {
+	n := 0
+	for {
+		b := next()
+		switch {
+		case b == '\n':
+			return n
+		case b == '\r':
+		case n < len(line):
+			line[n] = b
+			n++
+		}
+	}
+}
+
+// readBlock reads the bytes of a block into data, unescaped.
+func readBlock() {
+	for i := range data {
+		b := next()
+		if b == escape {
+			b = next() ^ flip
+		}
+		data[i] = b
+	}
+}
+
+// fletcher answers the Fletcher-32 checksum of p.
+func fletcher(p []byte) uint32 {
+	a, b := uint32(0), uint32(0)
+	for _, v := range p {
+		a += uint32(v)
+		b += a
+	}
+	return b%65535<<16 | a%65535
+}
+
+// word reports whether the line, of n bytes, begins with the word, alone or
+// followed by a space.
+func word(n int, w string) bool {
+	if n < len(w) {
+		return false
+	}
+	for i := 0; i < len(w); i++ {
+		if line[i] != w[i] {
+			return false
+		}
+	}
+	return n == len(w) || line[len(w)] == ' '
+}
+
+// number reads a number in the base from the line, of n bytes, from i to a
+// space or to the end, and answers it and where it ended, which is -1 if
+// there was no number there.
+func number(i, n int, base uint32) (uint32, int) {
+	v := uint32(0)
+	at := i
+	for ; at < n && line[at] != ' '; at++ {
+		var d uint32
+		c := line[at]
+		switch {
+		case c >= '0' && c <= '9':
+			d = uint32(c - '0')
+		case c >= 'a' && c <= 'f':
+			d = uint32(c-'a') + 10
+		default:
+			return 0, -1
+		}
+		if d >= base {
+			return 0, -1
+		}
+		v = v*base + d
+	}
+	if at == i {
+		return 0, -1
+	}
+	return v, at
+}
+
+// find takes the file the host names, whose blocks are what the host sends
+// and asks for from then on.
+func find(n int) {
+	if n <= 5 {
+		println("error: a file has a name")
+		return
+	}
+	sb := NewBuilder(name[:])
+	sb.Write(line[5:n])
+	f, err := volume.Find(sb.String())
+	if err != nil {
+		named = false
+		printf("error: %s\n", err.Error())
+		return
+	}
+	file = f
+	named = true
+	printf("file %s %d blocks from %d\n", sb.String(), f.Blocks, f.Block)
+}
+
+// put writes the block the host sends to the file. The bytes are read
+// whatever the header says, so that the line stays in step.
+func put(n int) {
+	block, i := number(6, n, 10)
+	var want uint32
+	if i >= 0 {
+		want, i = number(i+1, n, 16)
+	}
+	readBlock()
+	switch {
+	case i < 0:
+		println("error: a block comes as block N SUM")
+	case fletcher(data[:]) != want:
+		printf("bad %d\n", block)
+	case !named:
+		printf("error %d: no file was named\n", block)
+	case block >= file.Blocks:
+		printf("error %d: the file has %d blocks\n", block, file.Blocks)
+	default:
+		if err := card.Write(file.Block+block, data[:]); err != nil {
+			printf("error %d: %s\n", block, err.Error())
+		} else {
+			printf("ok %d\n", block)
+		}
+	}
+}
+
+// sums reads the file block by block and says what each sums to.
+func sums() {
+	if !named {
+		println("error: no file was named")
+		return
+	}
+	for block := uint32(0); block < file.Blocks; block++ {
+		if err := card.Read(file.Block+block, data[:]); err != nil {
+			printf("error %d: %s\n", block, err.Error())
+		} else {
+			printf("sum %d %08x\n", block, fletcher(data[:]))
+		}
+	}
+	println("done")
+}
+
+func main() {
+	go receive()
+	err := card.Open(cardClock, cardSelect, cardIn, cardOut)
+	if err == nil {
+		err = volume.Mount(&card)
+	}
+	if err != nil {
+		printf("error: %s\n", err.Error())
+		return
+	}
+	printf("card %d blocks\n", card.Blocks())
+	for {
+		n := readLine()
+		switch {
+		case word(n, "file"):
+			find(n)
+		case word(n, "block"):
+			put(n)
+		case word(n, "sum"):
+			sums()
+		case word(n, "quit"):
+			card.Close()
+			println("bye")
+			return
+		default:
+			println("error: file, block, sum and quit are the commands")
+		}
+	}
+}

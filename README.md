@@ -77,6 +77,7 @@ ogo build --unchecked --clock 200MHz     # as fast as it goes: 163,874 a second
 ogo test ./...                           # the tests, on the board
 scripts/twin.sh                          # the packages' tests under Go, no board needed
 scripts/talk.py                          # a talk with what is on the pack, on the board and in SimH
+scripts/card.py put RK0.DSK RK0.DSK      # a pack onto the card, through the board
 ```
 
 ## How it is put together
@@ -89,6 +90,7 @@ scripts/talk.py                          # a talk with what is on the pack, on t
 | [kw11](kw11) | the line clock |
 | [rk11](rk11) | the disk controller and its drives |
 | [sd](sd) | an SD card's blocks, read and written over SPI |
+| [card](card) | a second program: puts a file onto the card and sums one there, over the serial line |
 | [fat](fat) | where on a disk a file of its FAT32 volume is |
 | [mac](mac) | the PDP-11 programs it carries, in MACRO-11 and assembled |
 | [scripts](scripts) | what makes the test vectors, assembles the programs, and runs the tests under Go |
@@ -96,7 +98,7 @@ scripts/talk.py                          # a talk with what is on the pack, on t
 The cogs share memory and no lock: every variable two of them share is
 written by one of them only.
 
-Only the program at the root and `sd` know about the Propeller 2. The other
+Only the two programs and `sd` know about the Propeller 2. The other
 packages are Go once they are given a package clause, which is how their tests
 also run where there is no board. `sd` and `fat` know nothing about the PDP-11.
 
@@ -113,6 +115,11 @@ file deleted, so that it is in one piece.
 truncate -s 2494464 RK0.DSK              # an image that is shorter is made a whole pack
 cp RK0.DSK /media/card/ && sync
 ```
+
+Once a file is on the card it is written again through the board, the card
+staying in its slot: `scripts/card.py put RK0.DSK RK0.DSK` sends the image
+over the serial line and reads it back, in two minutes, and `scripts/card.py
+sum RK0.DSK RK0.DSK` says which of its blocks differ from the image.
 
 ## Software for it
 
