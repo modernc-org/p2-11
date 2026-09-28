@@ -13,23 +13,36 @@
 #
 # Neither is needed to build the emulator, to run it or to test it: the vectors
 # and the assembled programs are in the repository. They are needed to make
-# those again.
+# those again, and what is made is the same only from the same tools, so each
+# is fetched at the revision the repository's were made with.
 #
-# Usage: scripts/tools.sh
+# Usage: scripts/tools.sh [SIMH-REVISION [SIMTOOLS-REVISION]]
 set -eu
 unset CDPATH
+
+simh=${1:-87eb7d5e96f9ce0ee6ac183e20160e5c486b0712}     # Open SIMH V4.1-0 of 2026-07-15
+simtools=${2:-2d9a2d96caa013428f8d0686e26a4f0164c889bf} # of 2022-12-25
+
+# fetch DIRECTORY REPOSITORY REVISION
+fetch() {
+	if [ ! -d "$1/.git" ]; then
+		git init -q "$1"
+		git -C "$1" remote add origin "$2"
+	fi
+	if [ "$(git -C "$1" rev-parse -q --verify HEAD 2> /dev/null)" != "$3" ]; then
+		git -C "$1" fetch -q --depth 1 origin "$3"
+		git -C "$1" checkout -q --detach FETCH_HEAD
+	fi
+}
+
 root=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$root/tools"
 cd "$root/tools"
 
-if [ ! -d simh ]; then
-	git clone --depth 1 https://github.com/open-simh/simh.git
-fi
+fetch simh https://github.com/open-simh/simh.git "$simh"
 make -C simh pdp11 TESTS=0 NOVIDEO=1 NONETWORK=1
 
-if [ ! -d simtools ]; then
-	git clone --depth 1 https://github.com/simh/simtools.git
-fi
+fetch simtools https://github.com/simh/simtools.git "$simtools"
 make -C simtools/crossassemblers/macro11
 
 echo

@@ -38,13 +38,19 @@ def assemble(tools, source):
     with tempfile.TemporaryDirectory() as tmp:
         obj = os.path.join(tmp, 'a.obj')
         lst = os.path.join(tmp, 'a.lst')
-        r = subprocess.run([os.path.join(tools, 'macro11'), '-l', lst, '-o', obj, source],
-                           capture_output=True, text=True)
+        try:
+            r = subprocess.run([os.path.join(tools, 'macro11'), '-l', lst, '-o', obj, source],
+                               capture_output=True, text=True)
+        except OSError as e:
+            sys.exit('mac.py: %s: %s; scripts/tools.sh builds it' % (tools, e.strerror))
         if r.returncode != 0 or r.stdout.strip() or r.stderr.strip():
             sys.exit('mac.py: %s\n%s%s' % (source, r.stdout, r.stderr))
         listing = open(lst, errors='replace').read()
-        dump = subprocess.run([os.path.join(tools, 'dumpobj'), obj],
-                              capture_output=True, text=True, errors='replace').stdout
+        r = subprocess.run([os.path.join(tools, 'dumpobj'), obj],
+                           capture_output=True, text=True, errors='replace')
+        if r.returncode != 0:
+            sys.exit('mac.py: %s: dumpobj exited with %d\n%s' % (source, r.returncode, r.stderr))
+        dump = r.stdout
     if re.search(r'^\*\*\*', listing, re.M):
         sys.exit('mac.py: %s: the listing has errors\n%s' % (
             source, '\n'.join(l for l in listing.split('\n') if l.startswith('***'))))
@@ -130,9 +136,15 @@ def main():
     name = os.path.basename(base).capitalize()
     mem, start = assemble(args.macro11, args.source)
     out = args.o or base + '.ogo'
-    with open(out, 'w') as f:
-        f.write(table(name, args.source, mem, start))
-    subprocess.run(['ogo', 'fmt', '-w', out], check=True)
+    new = out + '.new.ogo'
+    try:
+        with open(new, 'w') as f:
+            f.write(table(name, args.source, mem, start))
+        subprocess.run(['ogo', 'fmt', '-w', new], check=True)
+        os.replace(new, out)
+    finally:
+        if os.path.exists(new):
+            os.unlink(new)
 
 
 if __name__ == '__main__':
