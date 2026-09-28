@@ -221,3 +221,44 @@ func TestDemo(t *testing.T) {
 		}
 	}
 }
+
+// A time is how far a machine has come that is made up.
+type time struct {
+	now uint32
+}
+
+func (t *time) Now() uint32 {
+	return t.now
+}
+
+// A line that is paced hands over what has arrived a byte at a time, so many
+// instructions after the one before it was read.
+func TestPace(t *testing.T) {
+	var (
+		paced Line
+		clock time
+	)
+	paced.Reset()
+	paced.Pace(&clock, 100)
+	clock.now = 1000
+	paced.Put('a')
+	paced.Put('b')
+	paced.Put('c')
+	expect(t, "the receiver, a byte there", paced.Read(rcsr), done)
+	clock.now += 50
+	expect(t, "the first byte", paced.Read(rbuf), 'a')
+	expect(t, "the receiver, the byte read", paced.Read(rcsr), 0)
+	clock.now += 99
+	expect(t, "the receiver, a little later", paced.Read(rcsr), 0)
+	clock.now++
+	expect(t, "the receiver, late enough", paced.Read(rcsr), done)
+	expect(t, "the second byte", paced.Read(rbuf), 'b')
+
+	// The time of a machine that is reset begins again, and what has
+	// arrived is not kept from it.
+	clock.now = 0
+	paced.Write(rcsr, enable, 0xffff)
+	expect(t, "the request, the machine begun again", paced.Request(), 0o060)
+	expect(t, "the third byte", paced.Read(rbuf), 'c')
+	expect(t, "the receiver, nothing there", paced.Read(rcsr), enable)
+}

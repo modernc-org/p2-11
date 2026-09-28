@@ -34,6 +34,11 @@ const (
 	ringSize = 256
 )
 
+// A Time says how far the machine has come, in instructions.
+type Time interface {
+	Now() uint32
+}
+
 // A Line is one DL11. The zero Line is ready to be attached; Reset brings it to
 // the state it powers up in.
 type Line struct {
@@ -55,8 +60,22 @@ type Line struct {
 	// Lost counts the bytes that arrived while the ring was full.
 	Lost uint32
 
+	time  Time
+	apart uint32 // how many instructions there are between two bytes received
+	taken uint32 // when the program read the last one
+
 	rxVector uint16
 	txVector uint16
+}
+
+// Pace has the line hand a program what has arrived no closer together than
+// so many instructions of the machine. A Line that is not paced hands over
+// the next byte as soon as the program has read one, which no line does that
+// takes a byte's time for a byte, and there are programs that count on the
+// time: RT-11 takes what it is sent at once the wrong way round.
+func (l *Line) Pace(t Time, apart uint32) {
+	l.time = t
+	l.apart = apart
 }
 
 // Vectors says which vectors the receiver and the transmitter interrupt
@@ -115,7 +134,7 @@ func (l *Line) Reset() {
 
 // update brings the registers up to what the other two cogs have done since.
 func (l *Line) update() {
-	if l.rx&done == 0 && l.tail != l.head {
+	if l.rx&done == 0 && l.tail != l.head && (l.time == nil || l.time.Now()-l.taken >= l.apart) {
 		l.in = uint16(l.ring[l.tail&(ringSize-1)])
 		l.tail++
 		l.rx |= done
@@ -140,6 +159,9 @@ func (l *Line) Read(a uint16) uint16 {
 	case rbuf:
 		l.rx &^= done
 		l.rxRequest = false
+		if l.time != nil {
+			l.taken = l.time.Now()
+		}
 		return l.in
 	case xcsr:
 		return l.tx

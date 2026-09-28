@@ -26,9 +26,17 @@ import (
 	"modernc.org/p2-11/rk11"
 )
 
-// hz is how many cycles a second the power line has: sixty where the PDP-11
-// comes from, and what its software expects unless it is told otherwise.
-const hz = 60
+const (
+	// hz is how many cycles a second the power line has: sixty where the
+	// PDP-11 comes from, and what its software expects unless it is told
+	// otherwise.
+	hz = 60
+
+	// apart is how many instructions there are between two characters the
+	// console hands the machine, however fast they are typed. It is what
+	// SimH leaves between them.
+	apart = 1000
+)
 
 var (
 	machine pdp11.Machine
@@ -69,6 +77,7 @@ func line() {
 // attach puts the devices on the machine's bus. It reports whether there was
 // room for them.
 func attach() bool {
+	console.Pace(&machine, apart)
 	disk.Connect(&machine, 0)
 	if !machine.Attach(&clock, 0o177546, kw11.Size, 6) {
 		return false
