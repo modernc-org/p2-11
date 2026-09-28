@@ -1,0 +1,443 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package sd reads and writes the blocks of an SD card.
+//
+// It talks to the card over SPI, which every SD card understands, and drives
+// the four pins of it itself: there is no smart pin in it and no cog of its
+// own. A card of any capacity will do. One of 2 GB or less counts in bytes and
+// a larger one in blocks, and a Card counts in blocks of 512 bytes with both.
+//
+// What is read is checked against the checksum the card sends with it, and
+// the card checks what it is sent in the same way, so that a bit that did not
+// arrive is an error and not a block of a disk that is wrong from then on.
+//
+// A Card is used by one cog at a time.
+
+import "p2"
+
+// BlockSize is how many bytes a block has.
+const BlockSize = 512
+
+// An Error is what went wrong with a card.
+type Error struct {
+	what string
+}
+
+func (e *Error) Error() string {
+	return e.what
+}
+
+// What goes wrong with a card. They are told apart by comparing, as in
+// err == &sd.ErrNoCard.
+var (
+	ErrNoCard  = Error{"sd: no card answers"}
+	ErrCard    = Error{"sd: the card is of no kind that is known here"}
+	ErrTimeout = Error{"sd: the card took too long"}
+	ErrRefused = Error{"sd: the card refused the command"}
+	ErrCRC     = Error{"sd: what arrived is not what was sent"}
+	ErrWrite   = Error{"sd: the card could not write the block"}
+	ErrBlock   = Error{"sd: no such block, or not 512 bytes for it"}
+)
+
+// The commands, by their numbers.
+const (
+	goIdle      = 0
+	sendIfCond  = 8
+	sendCSD     = 9
+	sendStatus  = 13
+	setBlockLen = 16
+	readBlock   = 17
+	writeBlock  = 24
+	appOpCond   = 41 // which is for the card after appCommand only
+	appCommand  = 55
+	readOCR     = 58
+	crcOnOff    = 59
+)
+
+const (
+	// What a card answers a command with, of which these are two bits.
+	idle    = 1 << 0 // the card is being set up
+	illegal = 1 << 2 // the card does not know the command
+
+	// What is sent when there is nothing to send, the card's input being
+	// high then.
+	nothing = 0xff
+
+	// token comes before a block, from whoever sends it.
+	token = 0xfe
+
+	// accepted is what the card answers a block it was sent with, and
+	// damaged what it answers one whose checksum is not its own.
+	accepted = 0x05
+	damaged  = 0x0b
+
+	// A card that is being set up takes a clock of 400 kHz at most. Half a
+	// cycle of so many microseconds, and what the code takes beside them,
+	// make it about 200 kHz.
+	halfCycle = 2
+
+	// settle is how many clocks of the Propeller 2 the card's clock stays
+	// low beyond what the code takes anyway, so that the bit the card
+	// changes when its clock falls is the bit that is read next. A pin
+	// follows what is written to it some clocks later, and what is read of
+	// a pin is as old. Measured with a P2-EC and one card, 3 is the least
+	// that will do, at 160 MHz and at 200 MHz alike. A card may take 14 ns
+	// to change its bit, which is three clocks at 200 MHz, and this leaves
+	// room for one that does.
+	settle = 8
+
+	// How many milliseconds a card is given to become ready when it is set
+	// up, and to come up with a block or to have written one.
+	settingUp = 1000
+	patience  = 500
+
+	// voltages is what a card is asked with whether it works at 2.7 to
+	// 3.6 V, and highCapacity what it is told with that blocks may be
+	// counted, and what it answers with that they are.
+	voltages     = 0x1aa
+	highCapacity = 1 << 30
+)
+
+// A Card is an SD card in its slot.
+type Card struct {
+	clk, cs, mosi, miso int
+
+	slow   bool     // the clock is what a card takes while it is set up
+	shift  uint32   // a block's number, shifted left by this, is its address
+	csd    [16]byte // what the card says of itself
+	blocks uint32
+}
+
+// crcs is the checksum of a block, CRC-16 of the CCITT, for every byte there
+// is.
+var crcs [256]uint16
+
+func init() {
+	for i := range crcs {
+		crc := uint16(i) << 8
+		for n := 0; n < 8; n++ {
+			if crc&0x8000 != 0 {
+				crc = crc<<1 ^ 0x1021
+			} else {
+				crc <<= 1
+			}
+		}
+		crcs[i] = crc
+	}
+}
+
+// Open sets up the card behind the four pins. A card that was open is set up
+// again, as one that has been taken out and put back wants to be.
+func (c *Card) Open(clk, cs, mosi, miso int) error {
+	c.clk, c.cs, c.mosi, c.miso = clk, cs, mosi, miso
+	c.blocks = 0
+	c.slow = true
+
+	// The card's output is pulled up, so that a slot with no card in it
+	// reads as nothing rather than as whatever comes.
+	p2.PinFloat(miso)
+	p2.WritePinMode(miso, p2.DriveHigh15K|p2.DriveLowFloat)
+	p2.PinHigh(miso)
+	p2.PinHigh(cs)
+	p2.PinHigh(mosi)
+	p2.PinLow(clk)
+
+	// A card wants a millisecond of power and 74 cycles of the clock before
+	// its first command.
+	p2.WaitMs(1)
+	for i := 0; i < 10; i++ {
+		c.transfer(nothing)
+	}
+
+	p2.PinLow(cs)
+	err := c.setUp()
+	c.release()
+	return err
+}
+
+// Blocks answers how many blocks the card has.
+func (c *Card) Blocks() uint32 {
+	return c.blocks
+}
+
+// Read reads a block into p, which is BlockSize bytes.
+func (c *Card) Read(block uint32, p []byte) error {
+	if len(p) != BlockSize || block >= c.blocks {
+		return &ErrBlock
+	}
+	p2.PinLow(c.cs)
+	var err error = &ErrRefused
+	if c.command(readBlock, block<<c.shift) == 0 {
+		err = c.receive(p)
+	}
+	c.release()
+	return err
+}
+
+// Write writes p, which is BlockSize bytes, to a block. The block is on the
+// card when Write returns.
+func (c *Card) Write(block uint32, p []byte) error {
+	if len(p) != BlockSize || block >= c.blocks {
+		return &ErrBlock
+	}
+	p2.PinLow(c.cs)
+	var err error = &ErrRefused
+	if c.command(writeBlock, block<<c.shift) == 0 {
+		err = c.send(p)
+	}
+	c.release()
+	return err
+}
+
+// setUp brings a card from whatever state it is in to where it reads and
+// writes blocks, and finds out what kind of card it is.
+func (c *Card) setUp() error {
+	// A card that was stopped in the middle of a block has the rest of it
+	// to send before it listens.
+	r := byte(nothing)
+	for try := 0; try < 100 && r != idle; try++ {
+		r = c.command(goIdle, 0)
+	}
+	if r != idle {
+		return &ErrNoCard
+	}
+
+	// A card that does not know the question is of the first version of
+	// the standard, which had no card of high capacity.
+	capacity := uint32(0)
+	if c.command(sendIfCond, voltages)&illegal == 0 {
+		if c.word()&0xfff != voltages {
+			return &ErrCard
+		}
+		capacity = highCapacity
+	}
+
+	start := p2.GetMs()
+	for r != 0 {
+		c.command(appCommand, 0)
+		r = c.command(appOpCond, capacity)
+		if r&^idle != 0 {
+			return &ErrCard
+		}
+		if p2.GetMs()-start > settingUp {
+			return &ErrTimeout
+		}
+	}
+
+	c.shift = 9
+	if capacity != 0 {
+		if c.command(readOCR, 0) != 0 {
+			return &ErrRefused
+		}
+		if c.word()&highCapacity != 0 {
+			c.shift = 0
+		}
+	}
+	if c.command(crcOnOff, 1) != 0 {
+		return &ErrRefused
+	}
+	if c.shift != 0 && c.command(setBlockLen, BlockSize) != 0 {
+		return &ErrRefused
+	}
+	c.slow = false
+	return c.size()
+}
+
+// size asks the card how large it is. There are two ways for a card to say
+// so, of which the first is a card's that counts in bytes.
+func (c *Card) size() error {
+	if c.command(sendCSD, 0) != 0 {
+		return &ErrRefused
+	}
+	if err := c.receive(c.csd[:]); err != nil {
+		return err
+	}
+	csd := &c.csd
+	switch csd[0] >> 6 {
+	case 0:
+		size := uint32(csd[6]&0x03)<<10 | uint32(csd[7])<<2 | uint32(csd[8])>>6
+		multiplier := uint32(csd[9]&0x03)<<1 | uint32(csd[10])>>7
+		blockLen := uint32(csd[5] & 0x0f)
+		if blockLen < 9 {
+			return &ErrCard
+		}
+		c.blocks = (size + 1) << (multiplier + 2) << (blockLen - 9)
+	case 1:
+		size := uint32(csd[7]&0x3f)<<16 | uint32(csd[8])<<8 | uint32(csd[9])
+		c.blocks = (size + 1) << 10
+	default:
+		return &ErrCard
+	}
+	return nil
+}
+
+// release lets go of the card, which lets go of its output a byte later.
+func (c *Card) release() {
+	p2.PinHigh(c.cs)
+	c.transfer(nothing)
+}
+
+// command sends a command and answers what the card says to it, which is
+// nothing if it says nothing.
+func (c *Card) command(number byte, argument uint32) byte {
+	c.transfer(nothing)
+	b := 0x40 | number
+	crc := crc7(0, b)
+	c.transfer(b)
+	for shift := 24; shift >= 0; shift -= 8 {
+		b = byte(argument >> uint32(shift))
+		crc = crc7(crc, b)
+		c.transfer(b)
+	}
+	c.transfer(crc<<1 | 1)
+	r := byte(nothing)
+	for i := 0; i < 10 && r&0x80 != 0; i++ {
+		r = c.transfer(nothing)
+	}
+	return r
+}
+
+// crc7 answers the checksum of a command, of which v is the next byte and
+// crc the checksum so far.
+func crc7(crc, v byte) byte {
+	for i := 0; i < 8; i++ {
+		crc <<= 1
+		if (crc^v)&0x80 != 0 {
+			crc ^= 0x09
+		}
+		v <<= 1
+	}
+	return crc
+}
+
+// word answers the four bytes that follow what the card said to some of the
+// commands.
+func (c *Card) word() uint32 {
+	v := uint32(0)
+	for i := 0; i < 4; i++ {
+		v = v<<8 | uint32(c.transfer(nothing))
+	}
+	return v
+}
+
+// wait answers the first byte the card sends that is not what it begins
+// with, or what it begins with if none comes in time. A card that is busy
+// sends zeros, and one that is looking for a block sends nothing.
+func (c *Card) wait(begin byte) byte {
+	start := p2.GetMs()
+	for p2.GetMs()-start <= patience {
+		if v := c.transfer(nothing); v != begin {
+			return v
+		}
+	}
+	return begin
+}
+
+// receive reads what the card sends after a command that asks for data: the
+// token, as many bytes as p has, and their checksum.
+func (c *Card) receive(p []byte) error {
+	switch c.wait(nothing) {
+	case token:
+	case nothing:
+		return &ErrTimeout
+	default:
+		return &ErrRefused
+	}
+	crc := c.read(p)
+	high := c.transfer(nothing)
+	low := c.transfer(nothing)
+	if crc != uint16(high)<<8|uint16(low) {
+		return &ErrCRC
+	}
+	return nil
+}
+
+// send writes what the card wants after a command that brings data, the
+// token, the bytes of p and their checksum, and waits until the card has
+// done with them.
+func (c *Card) send(p []byte) error {
+	c.transfer(nothing)
+	c.transfer(token)
+	crc := c.write(p)
+	c.transfer(byte(crc >> 8))
+	c.transfer(byte(crc))
+	switch c.transfer(nothing) & 0x1f {
+	case accepted:
+	case damaged:
+		return &ErrCRC
+	default:
+		return &ErrWrite
+	}
+	if c.wait(0) == 0 {
+		return &ErrTimeout
+	}
+
+	// That the block was taken does not say that it was written.
+	if c.command(sendStatus, 0) != 0 || c.transfer(nothing) != 0 {
+		return &ErrWrite
+	}
+	return nil
+}
+
+// transfer sends a byte and answers the one that came meanwhile, both with
+// the most significant bit first. The card takes a bit when the clock rises
+// and changes its own when the clock falls.
+func (c *Card) transfer(out byte) byte {
+	in := byte(0)
+	for i := 0; i < 8; i++ {
+		p2.PinWrite(c.mosi, int(out>>7))
+		out <<= 1
+		if c.slow {
+			p2.WaitUs(halfCycle)
+		} else {
+			p2.WaitCycles(settle)
+		}
+		p2.PinHigh(c.clk)
+		in = in<<1 | byte(p2.PinIn(c.miso))
+		if c.slow {
+			p2.WaitUs(halfCycle)
+		}
+		p2.PinLow(c.clk)
+	}
+	return in
+}
+
+// read fills p with what the card sends and answers the checksum of it. It is
+// transfer for many bytes, with nothing else in the loop than they need.
+func (c *Card) read(p []byte) uint16 {
+	clk, miso := c.clk, c.miso
+	crc := uint32(0)
+	p2.PinHigh(c.mosi)
+	for i := range p {
+		v := uint32(0)
+		for n := 8; n != 0; n-- {
+			p2.WaitCycles(settle)
+			p2.PinHigh(clk)
+			v = v<<1 | uint32(p2.PinIn(miso))
+			p2.PinLow(clk)
+		}
+		p[i] = byte(v)
+		crc = crc<<8&0xff00 ^ uint32(crcs[crc>>8^v])
+	}
+	return uint16(crc)
+}
+
+// write sends the card the bytes of p and answers the checksum of them.
+func (c *Card) write(p []byte) uint16 {
+	clk, mosi := c.clk, c.mosi
+	crc := uint32(0)
+	for i := range p {
+		v := uint32(p[i])
+		crc = crc<<8&0xff00 ^ uint32(crcs[crc>>8^v])
+		for n := 8; n != 0; n-- {
+			p2.PinWrite(mosi, int(v>>7&1))
+			p2.PinHigh(clk)
+			v <<= 1
+			p2.PinLow(clk)
+		}
+	}
+	p2.PinHigh(mosi)
+	return uint16(crc)
+}

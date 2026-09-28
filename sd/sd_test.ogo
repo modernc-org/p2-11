@@ -1,0 +1,143 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+import (
+	"p2"
+	"testing"
+)
+
+// The tests want a card in the slot of a P2 Edge module, and read it only. A
+// board with no card passes them, saying so: what there is to test is the
+// card's side of the conversation, and no program can take its part.
+
+// The pins of the slot on a P2 Edge module.
+const (
+	clk  = 61
+	cs   = 60
+	mosi = 59
+	miso = 58
+)
+
+var (
+	card   Card
+	block  [BlockSize]byte
+	again  [BlockSize]byte
+	absent bool
+)
+
+// open sets the card up and reports whether there is one to test.
+func open(t *testing.T) bool {
+	if absent {
+		return false
+	}
+	if card.Blocks() != 0 {
+		return true
+	}
+	switch err := card.Open(clk, cs, mosi, miso); {
+	case err == nil:
+		return true
+	case err == &ErrNoCard:
+		println("no card in the slot, and nothing tested")
+		absent = true
+	default:
+		println(err.Error())
+		t.Fail()
+	}
+	return false
+}
+
+func TestChecksums(t *testing.T) {
+	// The command that every card is sent first, and the one that asks for
+	// the voltage, with the checksums the standard gives for them.
+	crc := crc7(0, 0x40)
+	for i := 0; i < 4; i++ {
+		crc = crc7(crc, 0)
+	}
+	if crc<<1|1 != 0x95 {
+		printf("the checksum of the first command is %02x\n", crc<<1|1)
+		t.Fail()
+	}
+	crc = crc7(crc7(crc7(crc7(crc7(0, 0x48), 0), 0), 0x01), 0xaa)
+	if crc<<1|1 != 0x87 {
+		printf("the checksum of the second command is %02x\n", crc<<1|1)
+		t.Fail()
+	}
+
+	// A block of nothing but ones, which is what an erased card holds.
+	sum := uint16(0)
+	for i := 0; i < BlockSize; i++ {
+		sum = sum<<8 ^ crcs[byte(sum>>8)^0xff]
+	}
+	if sum != 0x7fa1 {
+		printf("the checksum of an empty block is %04x\n", sum)
+		t.Fail()
+	}
+}
+
+func TestOpen(t *testing.T) {
+	if !open(t) {
+		return
+	}
+	n := card.Blocks()
+	println("a card of", n, "blocks,", n/2048, "MB")
+	if n < 2048 {
+		t.Fail()
+	}
+
+	// And again, as for a card that was taken out and put back.
+	if err := card.Open(clk, cs, mosi, miso); err != nil || card.Blocks() != n {
+		println("opened again, the card has", card.Blocks(), "blocks")
+		t.Fail()
+	}
+}
+
+func TestRead(t *testing.T) {
+	if !open(t) {
+		return
+	}
+	for n := uint32(0); n < 3; n++ {
+		if err := card.Read(n, block[:]); err != nil {
+			println("block", n, err.Error())
+			t.Fail()
+			return
+		}
+		if err := card.Read(n, again[:]); err != nil || block != again {
+			println("block", n, "is not what it was when it is read again")
+			t.Fail()
+		}
+	}
+
+	// The last block there is, and the one after it.
+	last := card.Blocks() - 1
+	if err := card.Read(last, block[:]); err != nil {
+		println("block", last, err.Error())
+		t.Fail()
+	}
+	if err := card.Read(last+1, block[:]); err != &ErrBlock {
+		println("block", last+1, "is read, and the card has none")
+		t.Fail()
+	}
+	if err := card.Read(0, block[:100]); err != &ErrBlock {
+		println("a block is read into 100 bytes")
+		t.Fail()
+	}
+}
+
+// How long a block takes, which is what a disk made of them is as fast as.
+func TestSpeed(t *testing.T) {
+	if !open(t) {
+		return
+	}
+	const blocks = 200
+	start := p2.GetUs()
+	for n := uint32(0); n < blocks; n++ {
+		if err := card.Read(n, block[:]); err != nil {
+			println("block", n, err.Error())
+			t.Fail()
+			return
+		}
+	}
+	us := (p2.GetUs() - start) / blocks
+	println(us, "microseconds a block,", 1000000*BlockSize/1024/us, "KB a second")
+}
