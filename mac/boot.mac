@@ -1,0 +1,45 @@
+; Copyright 2026 The p2-11 Authors. All rights reserved.
+; Use of this source code is governed by a BSD-style
+; license that can be found in the LICENSE file.
+
+	.title	boot
+
+; The bootstrap of the RK11: it reads the first two blocks of the pack in a
+; drive to where memory begins, and goes on there. What a pack begins with is
+; told where it comes from as the bootstraps of a PDP-11 tell it: the drive is
+; in r0 and the address of the controller's control and status register in
+; r1, and r4 is where to begin again.
+;
+; The drive is the word at start+6, for whoever loads this to change.
+
+	.asect
+	.=2000
+
+	rkcs	= 177404
+	rkwc	= rkcs+2
+	rkba	= rkcs+4
+	rkda	= rkcs+6
+	read	= 5			; with the bit that begins it
+
+start:	mov	#start, sp
+	mov	#0, r0
+again:	mov	#rkcs, r1
+	mov	r0, r3
+	ash	#13., r3		; a drive is the upper three bits of
+	mov	r3, rkda-rkcs(r1)	; a disk address
+	clr	rkba-rkcs(r1)
+	mov	#-512., rkwc-rkcs(r1)
+	mov	#read, (r1)
+1$:	tstb	(r1)
+	bpl	1$
+	tst	(r1)
+	bmi	2$			; nothing to go on with
+	clrb	(r1)
+	clr	r2
+	clr	r3
+	mov	#again, r4
+	clr	r5
+	clr	pc
+2$:	halt
+
+	.end	start

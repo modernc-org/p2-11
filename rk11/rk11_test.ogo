@@ -1,0 +1,374 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+import (
+	"testing"
+
+	"modernc.org/p2-11/mac"
+	"modernc.org/p2-11/pdp11"
+)
+
+// The controller on the bus of a machine that runs mac/disk.mac, with packs
+// that are made up, and what the program leaves compared with what it leaves
+// in SimH; and then what that program cannot ask, by hand. This test is both
+// cogs in turn.
+
+const (
+	at = 0o177400
+
+	cs = at + 2*rkcs
+	er = at + 2*rker
+	wc = at + 2*rkwc
+	ba = at + 2*rkba
+	da = at + 2*rkda
+	ds = at + 2*rkds
+)
+
+// A pack is a pack that is made up: a block of it is its own number 128
+// times, in two words of which the second has the number of the drive as
+// well, until it is written. It has room for a few blocks that are.
+type pack struct {
+	drive uint32
+	fails bool // nothing can be read or written
+	after int  // when so many blocks have been
+
+	written [8]uint32 // which blocks, by their numbers and one
+	data    [8][BlockSize]byte
+	reads   int
+	writes  int
+}
+
+var errPack = failed{"the pack cannot be read"}
+
+type failed struct {
+	what string
+}
+
+func (f *failed) Error() string {
+	return f.what
+}
+
+func (p *pack) Read(block uint32, b []byte) error {
+	p.reads++
+	if p.fails && p.after == 0 || block >= Blocks || len(b) != BlockSize {
+		return &errPack
+	}
+	p.after--
+	for i := range p.written {
+		if p.written[i] == block+1 {
+			copy(b, p.data[i][:])
+			return nil
+		}
+	}
+	v := block | p.drive<<16
+	for i := 0; i < BlockSize; i += 4 {
+		b[i] = byte(v)
+		b[i+1] = byte(v >> 8)
+		b[i+2] = byte(v >> 16)
+		b[i+3] = byte(v >> 24)
+	}
+	return nil
+}
+
+func (p *pack) Write(block uint32, b []byte) error {
+	p.writes++
+	if p.fails && p.after == 0 || block >= Blocks || len(b) != BlockSize {
+		return &errPack
+	}
+	p.after--
+	for i := range p.written {
+		if p.written[i] == block+1 || p.written[i] == 0 {
+			p.written[i] = block + 1
+			copy(p.data[i][:], b)
+			return nil
+		}
+	}
+	return &errPack
+}
+
+var (
+	machine  pdp11.Machine
+	disk     Controller
+	packs    [2]pack
+	attached bool
+)
+
+// fresh answers a machine that has the controller and nothing else, with
+// packs in the drives 0 and 1 that nothing was written to, and memory that is
+// empty but for the program, if there is one. A cog serves the controller if
+// served says so, which is this test when it calls serve.
+func fresh(t *testing.T, served bool, program []uint16) *pdp11.Machine {
+	if !attached {
+		attached = machine.Attach(&disk, at, Size, 5)
+		if !attached {
+			println("no room on the bus")
+			t.Fail()
+		}
+	}
+	disk = Controller{served: served}
+	disk.Connect(&machine, 0)
+	for i := range packs {
+		packs[i] = pack{drive: uint32(i)}
+		disk.Attach(i, &packs[i], false)
+	}
+	machine.Reset()
+	for a := uint32(0); a < pdp11.IOPage; a += 2 {
+		machine.Deposit(uint16(a), 0)
+	}
+	machine.Load(0o1000, program)
+	machine.R[7] = 0o1000
+	return &machine
+}
+
+// serve is the cog of the disk, for as long as there is something to do.
+func serve() {
+	if disk.ordered != disk.finished {
+		disk.work()
+	}
+}
+
+// expect fails the test unless got is want.
+func expect(t *testing.T, what string, got, want uint16) {
+	if got != want {
+		printf("%s %06o, want %06o\n", what, got, want)
+		t.Fail()
+	}
+}
+
+// ask has the controller begin a function, as a program does.
+func ask(f, disk, memory, words uint16) {
+	machineWrite(da, disk)
+	machineWrite(ba, memory)
+	machineWrite(wc, -words)
+	machineWrite(cs, f<<1|start)
+}
+
+func machineWrite(a, v uint16) {
+	machine.Deposit(a, v)
+}
+
+func machineRead(a uint16) uint16 {
+	v, _ := machine.Examine(a)
+	return v
+}
+
+// compare fails the test unless the machine has halted where the program
+// does in SimH, with the table SimH has.
+func compare(t *testing.T, m *pdp11.Machine, state pdp11.State) {
+	if state != pdp11.Halted {
+		println("the state is", int(state))
+		t.Fail()
+	}
+	expect(t, "PC", m.R[7], mac.DiskHalts)
+	expect(t, "the end of the table", m.R[5], mac.DiskTableAt+2*uint16(len(mac.DiskTable)))
+	wrong := 0
+	for i, want := range mac.DiskTable {
+		a := mac.DiskTableAt + 2*uint16(i)
+		if got, _ := m.Examine(a); got != want && wrong < 10 {
+			printf("%06o: %06o, want %06o\n", a, got, want)
+			wrong++
+			t.Fail()
+		}
+	}
+}
+
+// The controller that does the transfers itself.
+func TestSimH(t *testing.T) {
+	m := fresh(t, false, mac.Disk[:])
+	compare(t, m, m.Run(1<<22))
+	if packs[0].writes != 4 || packs[1].writes != 0 {
+		println("blocks written:", packs[0].writes, "and", packs[1].writes)
+		t.Fail()
+	}
+}
+
+// The controller that a cog serves, which here looks for something to do
+// after every few instructions.
+func TestSimHServed(t *testing.T) {
+	for every := uint32(1); every < 1000; every *= 7 {
+		m := fresh(t, true, mac.Disk[:])
+		state := pdp11.Running
+		for n := 0; n < 1<<22 && state == pdp11.Running; n++ {
+			state = m.Run(every)
+			serve()
+		}
+		compare(t, m, state)
+	}
+}
+
+// A function is not begun while another is being done, the disk address is
+// not written then, and the drive is busy.
+func TestBusy(t *testing.T) {
+	fresh(t, true, nil)
+	ask(read, 7, 0o20000, 256)
+	expect(t, "the controller, with a block to read", machineRead(cs), read<<1)
+	expect(t, "the drive", machineRead(ds)&(ready|idle), ready)
+	ask(write, 0o410, 0o30000, 256)
+	expect(t, "the controller, asked for more", machineRead(cs), write<<1)
+	expect(t, "the disk address", machineRead(da), 7)
+
+	serve()
+	expect(t, "the controller, the block read", machineRead(cs), write<<1|done)
+	expect(t, "the disk address", machineRead(da), 0o10)
+	expect(t, "the drive", machineRead(ds)&(ready|idle), ready|idle)
+	expect(t, "the first word read", machineRead(0o20000), 7)
+	if packs[0].writes != 0 || packs[0].reads != 1 {
+		println("blocks read:", packs[0].reads, "and written:", packs[0].writes)
+		t.Fail()
+	}
+}
+
+// A drive that seeks does nothing else, and is about it for as long as it
+// takes to look at the controller twice.
+func TestSeeking(t *testing.T) {
+	fresh(t, false, nil)
+	ask(seek, 0o6200, 0o20000, 256)
+	expect(t, "the drives that seek", disk.seeking, 1<<0)
+	machineWrite(cs, read<<1|start)
+	expect(t, "the error", disk.er, driveError)
+	expect(t, "the controller, the drive there", machineRead(cs), failure|hardFailure|searched|read<<1|done)
+	expect(t, "the drive", machineRead(ds)&(ready|idle), ready|idle)
+	if packs[0].reads != 0 {
+		println("blocks read:", packs[0].reads)
+		t.Fail()
+	}
+	ask(controlReset, 0, 0, 0)
+	ask(read, 7, 0o20000, 256)
+	expect(t, "the controller at last", machineRead(cs), read<<1|done)
+	expect(t, "the first word read", machineRead(0o20000), 7)
+}
+
+// A pack that cannot be read is a checksum that is wrong, which a program
+// tries again, and one that cannot be written is the drive's error.
+func TestPackFails(t *testing.T) {
+	fresh(t, false, nil)
+	packs[0].fails = true
+	ask(read, 0, 0o20000, 512)
+	expect(t, "the controller after a read", machineRead(cs), failure|read<<1|done)
+	expect(t, "the error", machineRead(er), checksum)
+	expect(t, "the word count", machineRead(wc), 0o177000)
+	ask(check, 0, 0o20000, 512)
+	expect(t, "the error after a comparison", machineRead(er), checksum)
+	ask(readCheck, 0, 0o20000, 512)
+	expect(t, "the error after a read without memory", machineRead(er), checksum)
+	ask(write, 0, 0o20000, 512)
+	expect(t, "the controller after a write", machineRead(cs), failure|hardFailure|write<<1|done)
+	expect(t, "the error", machineRead(er), driveError)
+	expect(t, "the word count", machineRead(wc), 0o177000)
+
+	// And the second block of two.
+	packs[0].after = 1
+	ask(controlReset, 0, 0, 0)
+	ask(write, 1, 0o20000, 512)
+	expect(t, "the error after two blocks", machineRead(er), driveError)
+	expect(t, "the word count", machineRead(wc), 0o177400)
+	expect(t, "the bus address", machineRead(ba), 0o21000)
+	expect(t, "the disk address", machineRead(da), 2)
+	packs[0].after = 1
+	ask(controlReset, 0, 0, 0)
+	ask(read, 1, 0o20000, 512)
+	expect(t, "the error after two blocks", machineRead(er), checksum)
+	expect(t, "the word count", machineRead(wc), 0o177400)
+	expect(t, "the bus address", machineRead(ba), 0o21000)
+	expect(t, "the disk address", machineRead(da), 2)
+}
+
+// A drive whose switch is at WRITE LOCK stays locked when it is reset.
+func TestLocked(t *testing.T) {
+	fresh(t, false, nil)
+	if !disk.Attach(1, &packs[1], true) || disk.Attach(8, &packs[1], false) || disk.Attach(-1, &packs[1], false) {
+		println("a drive there is cannot have a pack, or one there is not can")
+		t.Fail()
+	}
+	ask(driveReset, 0o20000, 0, 0)
+	machineRead(cs)
+	expect(t, "the drive", machineRead(ds)&writeLocked, writeLocked)
+	ask(write, 0o20000, 0o20000, 256)
+	expect(t, "the error", machineRead(er), writeLock)
+	ask(controlReset, 0, 0, 0)
+	ask(read, 0o20000, 0o20000, 256)
+	expect(t, "the error after a read", machineRead(er), 0)
+
+	// And a drive the pack was taken out of is no drive.
+	disk.Attach(1, nil, false)
+	ask(read, 0o20000, 0o20000, 256)
+	expect(t, "the error with no pack", machineRead(er), noDrive)
+	expect(t, "the drive", machineRead(ds), 0)
+}
+
+// The machine's reset takes the interrupt back that was asked for, and the
+// errors, and leaves the word count.
+func TestReset(t *testing.T) {
+	m := fresh(t, false, nil)
+	ask(read, 0o14, 0o20000, 256)
+	machineWrite(cs, enable)
+	if disk.Request() != 0o220 {
+		println("no interrupt is asked for")
+		t.Fail()
+	}
+	m.Reset()
+	if disk.Request() != 0 {
+		println("an interrupt is asked for after a reset")
+		t.Fail()
+	}
+	expect(t, "the controller", machineRead(cs), done)
+	expect(t, "the error", machineRead(er), 0)
+	expect(t, "the word count", machineRead(wc), 0o177400)
+	expect(t, "the bus address", machineRead(ba), 0)
+	expect(t, "the disk address", machineRead(da), 0)
+
+	disk.Connect(&machine, 0o224)
+	machineWrite(cs, enable)
+	if disk.Request() != 0o224 {
+		println("no interrupt is asked for through another vector")
+		t.Fail()
+	}
+}
+
+// The bootstrap reads the first two blocks of a pack to where memory begins
+// and goes on there, which with a pack that is made up is a HALT, and tells
+// what it reads where it comes from.
+func TestBoot(t *testing.T) {
+	for drive := uint16(0); drive < 2; drive++ {
+		m := fresh(t, drive == 0, nil)
+		packs[drive].written[0] = 1 + 1
+		packs[drive].data[0][0] = 0o123
+		m.Load(mac.BootAt, mac.Boot[:])
+		m.Deposit(mac.BootAt+6, drive)
+		m.R[7] = mac.BootStart
+		state := pdp11.Running
+		for n := 0; n < 1000 && state == pdp11.Running; n++ {
+			state = m.Run(3)
+			serve()
+		}
+		if state != pdp11.Halted {
+			println("the state is", int(state))
+			t.Fail()
+		}
+		expect(t, "PC", m.R[7], 2)
+		expect(t, "SP", m.R[6], mac.BootAt)
+		expect(t, "R0", m.R[0], drive)
+		expect(t, "R1", m.R[1], cs)
+		expect(t, "R2", m.R[2], 0)
+		expect(t, "R3", m.R[3], 0)
+		expect(t, "R4", m.R[4], mac.BootAt+0o10)
+		expect(t, "R5", m.R[5], 0)
+		expect(t, "the second word of the pack", machineRead(2), drive)
+		expect(t, "the first word of its second block", machineRead(0o1000), 0o123)
+		expect(t, "the last word of that", machineRead(0o1776), 0)
+		expect(t, "the word after it", machineRead(0o2000), mac.Boot[0])
+		expect(t, "the controller", machineRead(cs), done)
+		expect(t, "the disk address", machineRead(da), drive<<13|2)
+	}
+
+	// A drive with no pack in it is where the bootstrap halts.
+	m := fresh(t, false, nil)
+	disk.Attach(0, nil, false)
+	m.Load(mac.BootAt, mac.Boot[:])
+	m.R[7] = mac.BootStart
+	if state := m.Run(1000); state != pdp11.Halted || m.R[7] < mac.BootAt {
+		printf("the state is %d, and PC %06o\n", int(state), m.R[7])
+		t.Fail()
+	}
+}

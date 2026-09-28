@@ -1,0 +1,325 @@
+; Copyright 2026 The p2-11 Authors. All rights reserved.
+; Use of this source code is governed by a BSD-style
+; license that can be found in the LICENSE file.
+
+	.title	disk
+
+; What the RK11 does, step by step. After every step its number goes into a
+; table with the registers of the controller, and with a sum of what was read
+; where something was. The table is compared with the one SimH has made of the
+; same program and the same packs, by the tests of rk11.
+;
+; There are packs in the drives 0 and 1, and no other drives. A block of a
+; pack is its own number 128 times, in two words of which the second has the
+; number of the drive as well. Nothing here depends on how long a drive takes.
+
+	.asect
+	.=1000
+
+	rkds	= 177400
+	rker	= 177402
+	rkcs	= 177404
+	rkwc	= 177406
+	rkba	= 177410
+	rkda	= 177412
+
+	table	= 10000			; what the steps leave
+	buffer	= 20000			; three blocks that are read into
+	other	= 30000			; and three that are written from
+	blocks	= 768.			; words in either
+	top	= 160000		; where memory ends
+
+	creset	= 1			; the functions, with the bit that
+	write	= 3			; begins them
+	read	= 5
+	wcheck	= 7
+	seek	= 11
+	rcheck	= 13
+	dreset	= 15
+	wlock	= 17
+	ie	= 100			; and what goes with them
+	sse	= 400
+	fmt	= 2000
+	inh	= 4000
+
+	drive1	= 20000			; in a disk address
+	drive7	= 160000
+
+start:	mov	#start, sp
+	mov	#table, r5
+	mov	#lost, @#4
+	mov	#340, @#6
+	mov	#took, @#220
+	mov	#240, @#222		; at priority 5, the controller's own
+	clr	r3
+	jsr	pc, fill
+	reset
+	jsr	r4, note
+	.word	1
+
+; Reading: a block, three blocks across the end of a cylinder, a hundred
+; words, and a block of the other drive.
+	jsr	r4, act
+	.word	7, buffer, -256., read
+	jsr	r4, note
+	.word	2
+	jsr	r4, act
+	.word	33, buffer, -768., read	; block 23
+	jsr	r4, note
+	.word	3
+	jsr	r4, act
+	.word	204, buffer, -100., read	; block 100
+	jsr	r4, note
+	.word	4
+	jsr	r4, act
+	.word	drive1+5, buffer, -256., read
+	jsr	r4, note
+	.word	5
+
+; Writing: a block, and ten words of the next one, which is zeros after them.
+	jsr	r4, act
+	.word	410, other, -256., write	; block 200
+	jsr	r4, note
+	.word	6
+	jsr	r4, act
+	.word	411, other+1000, -10., write
+	jsr	r4, note
+	.word	7
+	jsr	r4, act
+	.word	410, buffer, -512., read
+	jsr	r4, note
+	.word	10
+
+; Comparing what was written with what it was written from: as it is, with a
+; word of it changed, and up to that word.
+	jsr	r4, act
+	.word	410, other, -256., wcheck
+	jsr	r4, note
+	.word	11
+	inc	@#other+12
+	jsr	r4, act
+	.word	410, other, -256., wcheck
+	jsr	r4, note
+	.word	12
+	jsr	r4, act
+	.word	410, other, -256., wcheck+sse
+	jsr	r4, note
+	.word	13
+	dec	@#other+12
+
+; Reading without memory: the errors of a moment ago are gone with it.
+	jsr	r4, act
+	.word	0, buffer, -512., rcheck
+	jsr	r4, note
+	.word	14
+
+; What there is not: a sector, a cylinder, a drive. The controller is reset
+; after each, which is the way to be rid of an error.
+	jsr	r4, act
+	.word	14, buffer, -256., read
+	jsr	r4, note
+	.word	15
+	mov	#creset, @#rkcs
+	jsr	r4, note
+	.word	16
+	jsr	r4, act
+	.word	14540, buffer, -256., read	; cylinder 203
+	jsr	r4, note
+	.word	17
+	mov	#creset, @#rkcs
+	jsr	r4, act
+	.word	drive7, buffer, -256., read
+	jsr	r4, note
+	.word	20
+	mov	#creset, @#rkcs
+
+; Memory that ends: two blocks read into the last block of it, and a block
+; written from the last half block.
+	jsr	r4, act
+	.word	1, top-1000, -512., read
+	jsr	r4, note
+	.word	21
+	mov	#creset, @#rkcs
+	jsr	r4, act
+	.word	412, top-400, -256., write	; block 202
+	jsr	r4, note
+	.word	22
+	mov	#creset, @#rkcs
+	jsr	r4, act
+	.word	412, buffer, -256., read
+	jsr	r4, note
+	.word	23
+
+; A pack that ends: two blocks from the last one.
+	jsr	r4, act
+	.word	14533, buffer, -512., read	; block 4871
+	jsr	r4, note
+	.word	24
+	mov	#creset, @#rkcs
+
+; What cannot be asked for: a seek with the format bit.
+	jsr	r4, act
+	.word	0, buffer, -256., seek+fmt
+	jsr	r4, note
+	.word	25
+	mov	#creset, @#rkcs
+
+; A drive that is locked is not written to, until it is reset. The reset is
+; a seek to the first cylinder, and the drive says when it is there.
+	jsr	r4, act
+	.word	drive1, other, -256., wlock
+	jsr	r4, note
+	.word	26
+	jsr	r4, act
+	.word	drive1, other, -256., write
+	jsr	r4, note
+	.word	27
+	mov	#creset, @#rkcs
+	jsr	r4, act
+	.word	drive1, other, -256., dreset
+	jsr	pc, found
+	jsr	r4, note
+	.word	30
+	jsr	r4, act
+	.word	drive1+6200, other, -256., seek	; cylinder 100
+	jsr	pc, found
+	jsr	r4, note
+	.word	31
+	jsr	r4, act
+	.word	drive1+6200, buffer, -256., read
+	jsr	r4, note
+	.word	32
+
+; Interrupts: one for a block read, two for a seek, of which the second is
+; the drive's, and one for saying that there may be interrupts to a
+; controller that is ready.
+	mov	#buffer, @#rkba
+	mov	#-256., @#rkwc
+	mov	#1, @#rkda
+	mov	#read+ie, @#rkcs
+1$:	tst	r3
+	beq	1$
+	jsr	r4, note
+	.word	33
+	clr	@#rkcs
+	clr	r3
+	mov	#drive1+3100, @#rkda	; cylinder 50
+	mov	#seek+ie, @#rkcs
+2$:	cmp	r3, #2
+	blo	2$
+	jsr	r4, note
+	.word	34
+	clr	@#rkcs
+	clr	r3
+	mov	#ie, @#rkcs
+	nop
+	mov	r3, (r5)+
+	clr	@#rkcs
+	mov	#creset, @#rkcs
+
+; The bus address that stays where it is: the last word of a block read is
+; what is there, and a block written is the word that is there, 256 times.
+	jsr	r4, act
+	.word	drive1+204, buffer, -256., read+inh
+	jsr	r4, note
+	.word	35
+	mov	#123456, @#other+2000
+	jsr	r4, act
+	.word	413, other+2000, -256., write+inh	; block 203
+	jsr	r4, note
+	.word	36
+	jsr	r4, act
+	.word	413, buffer, -256., read
+	jsr	r4, note
+	.word	37
+
+; The headers of three sectors, the last of which no pack has.
+	jsr	r4, act
+	.word	14532, buffer, -3, read+fmt	; block 4870
+	jsr	r4, note
+	.word	40
+	mov	#creset, @#rkcs
+
+; A register written a byte at a time.
+	mov	#buffer, @#rkba
+	mov	#-256., @#rkwc
+	mov	#2, @#rkda
+	movb	#read, @#rkcs
+	jsr	pc, ready
+	jsr	r4, note
+	.word	41
+	movb	#fmt/400, @#rkcs+1
+	movb	#377, @#rkwc+1
+	movb	#1, @#rkba
+	movb	#3, @#rkda
+	jsr	r4, note
+	.word	42
+	mov	#creset, @#rkcs
+	jsr	r4, note
+	.word	43
+	halt
+
+; act has the controller do a function and waits for the controller. What
+; follows the call is the disk address, the bus address, the word count and
+; the function.
+act:	mov	(r4)+, @#rkda
+	mov	(r4)+, @#rkba
+	mov	(r4)+, @#rkwc
+	mov	(r4)+, @#rkcs
+	jsr	pc, ready
+	rts	r4
+
+; ready waits for the controller.
+ready:	tstb	@#rkcs
+	bpl	ready
+	rts	pc
+
+; found waits for a drive that seeks.
+found:	bit	#20000, @#rkcs
+	beq	found
+	rts	pc
+
+; note writes into the table the number that follows the call, the registers,
+; and a sum of the buffer, which it clears.
+note:	mov	(r4)+, (r5)+
+	mov	@#rkcs, (r5)+
+	mov	@#rker, (r5)+
+	mov	@#rkwc, (r5)+
+	mov	@#rkba, (r5)+
+	mov	@#rkda, (r5)+
+	mov	@#rkds, r0
+	bic	#37, r0			; which sector is under the heads is
+	mov	r0, (r5)+		; anybody's guess
+	mov	#buffer, r1
+	mov	#blocks, r2
+	clr	r0
+1$:	asl	r0
+	adc	r0
+	add	(r1), r0
+	clr	(r1)+
+	sob	r2, 1$
+	mov	r0, (r5)+
+	rts	r4
+
+; fill writes something into the blocks that are written from.
+fill:	mov	#other, r1
+	mov	#blocks, r2
+	mov	#1, r0
+1$:	mov	r0, (r1)+
+	add	#3, r0
+	sob	r2, 1$
+	rts	pc
+
+; took is where an interrupt of the controller goes: it counts, and writes
+; into the table which drive the interrupt is about.
+took:	inc	r3
+	mov	@#rkds, r0
+	bic	#17777, r0
+	mov	r0, (r5)+
+	rti
+
+; lost is where a trap goes, of which there are to be none.
+lost:	mov	#177777, (r5)+
+	halt
+
+	.end	start

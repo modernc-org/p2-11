@@ -1,0 +1,662 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package rk11 is the RK11 disk controller with up to eight RK05 drives: six
+// registers from 177400, an interrupt through 220 at priority 5, and packs of
+// 4872 blocks, which are 203 cylinders of two surfaces of twelve sectors of
+// 256 words.
+//
+// A pack is whatever reads and writes blocks of 512 bytes by their numbers.
+// The controller moves them to memory and from it by itself, as the RK11 does,
+// while the processor goes on with the program.
+//
+// A Controller is shared by two cogs, and no lock is needed between them
+// because every variable they share is written by one of them only. The cog
+// that steps the machine owns the registers, and says what is to be done in
+// an order. The cog that Serve runs on does it, which takes a millisecond or
+// two a block, and says what came of it in a report. A Controller that no cog
+// serves does the transfer on the machine's cog, which waits for it.
+//
+// Nothing here knows about the Propeller 2, nor what a pack is kept on.
+
+const (
+	// Size is how many bytes of the I/O page a Controller takes.
+	Size = 16
+
+	// BlockSize is how many bytes a block of a pack has, and Blocks how many
+	// blocks a pack.
+	BlockSize = 512
+	Blocks    = cylinders * surfaces * sectors
+
+	drives    = 8
+	cylinders = 203
+	surfaces  = 2
+	sectors   = 12
+	perSector = BlockSize / 2 // words
+)
+
+// The registers, by the order they are in.
+const (
+	rkds = iota // drive status
+	rker        // error
+	rkcs        // control and status
+	rkwc        // word count: minus how many words are to be moved
+	rkba        // bus address: where in memory
+	rkda        // disk address: drive, cylinder, surface and sector
+)
+
+// The bits of the drive status register.
+const (
+	counter     = 0o000017 // the sector that is under the heads
+	onSector    = 0o000020 // which is the one the disk address names
+	writeLocked = 0o000040
+	idle        = 0o000100 // the drive neither seeks nor transfers
+	ready       = 0o000200
+	counted     = 0o000400 // the sector counter can be relied on
+	highDensity = 0o004000 // the drive is an RK05
+	interrupter = 0o160000 // the drive the last interrupt was about
+)
+
+// The bits of the error register.
+const (
+	writeCheck  = 0o000001 // what is on the pack is not what is in memory
+	checksum    = 0o000002 // a sector could not be read
+	noSector    = 0o000040
+	noCylinder  = 0o000100
+	noDrive     = 0o000200
+	noMemory    = 0o002000
+	programming = 0o004000 // format asked for with what is no read or write
+	writeLock   = 0o020000 // a write to a drive that is locked
+	overrun     = 0o040000 // the transfer went past the end of the pack
+	driveError  = 0o100000
+
+	implemented = 0o177743
+	soft        = writeCheck | checksum
+	hard        = 0o177740
+)
+
+// The bits of the control and status register.
+const (
+	start       = 0o000001
+	function    = 0o000016
+	extension   = 0o000060 // the two bits of the memory address above sixteen
+	enable      = 0o000100 // interrupt enable
+	done        = 0o000200 // the controller is ready for a function
+	stopOnSoft  = 0o000400
+	format      = 0o002000
+	inhibit     = 0o004000 // every word of the transfer is at the bus address
+	searched    = 0o020000 // a seek or a drive reset has come to its end
+	hardFailure = 0o040000
+	failure     = 0o100000
+
+	kept     = 0o026776 // the bits the register holds
+	writable = 0o006576 // of which a program writes these
+)
+
+// The functions.
+const (
+	controlReset = iota
+	write
+	read
+	check        // compares the pack with memory
+	seek
+	readCheck    // reads the pack and leaves memory alone
+	driveReset
+	lock         // the drive, until it is reset
+)
+
+// The bits of the disk address register. Between the sector and the cylinder
+// is the surface, and the two are the track.
+const (
+	sector    = 0o000017
+	driveBits = 0o160000
+)
+
+// Who asks for an interrupt: the controller, or the drive n with the bit
+// above it by n.
+const (
+	controller = 1 << 0
+	firstDrive = 1 << 1
+)
+
+// settling is how many times the controller is looked at before a seek that
+// was begun has come to its end. It takes no time here, and the controller
+// is ready for the next function before the drive is, as it is with a drive
+// that has an arm to move.
+const settling = 2
+
+// A Disk is a pack: blocks of BlockSize bytes, by their numbers.
+type Disk interface {
+	Read(block uint32, p []byte) error
+	Write(block uint32, p []byte) error
+}
+
+// A Memory is what the controller moves data to and from: memory by its
+// addresses of 18 bits, a word in two bytes and the lower one first. Both
+// answer how many bytes were moved before memory ended.
+type Memory interface {
+	Fetch(a uint32, p []byte) int
+	Store(a uint32, p []byte) int
+}
+
+// A drive is one RK05.
+type drive struct {
+	pack   Disk
+	locked bool // its switch is at WRITE LOCK
+	soft   bool // a program has locked it
+}
+
+// An order is what the machine's cog wants done.
+type order struct {
+	function uint16
+	control  uint16 // the control and status register when it was given
+	pack     Disk
+	block    uint32 // where on the pack
+	words    uint32 // how many words
+	memory   uint32 // where in memory
+	here     bool   // the machine's cog does it itself
+}
+
+// A report is what came of an order.
+type report struct {
+	words  uint32 // how many words were moved
+	errors uint16
+}
+
+// A Controller is one RK11 with its drives. The zero Controller has no packs;
+// Reset brings it to the state it powers up in.
+type Controller struct {
+	memory Memory
+	vector uint16
+	drive  [drives]drive
+
+	// The registers, of which the drive status is made up when it is read.
+	about              uint16 // the drive the last interrupt was about, where it is in rkds
+	er, cs, wc, ba, da uint16
+
+	asking  uint16 // who asks for an interrupt
+	last    uint16 // the drive of the last function that was no seek
+	seeking uint16 // the drives that seek, a bit each
+	settle  uint16 // how many looks until they have done
+	turned  uint16 // the sector counter
+	busy    bool   // an order is given and the report of it not read
+	trimmed bool   // and it was for more than the pack has
+
+	// Between the cogs. The machine's writes the order, then its number, and
+	// the number it wants abandoned. The other writes the report, then the
+	// number of the order it is of.
+	order     order
+	ordered   uint32
+	abandoned uint32
+	report    report
+	finished  uint32
+	served    bool
+
+	// The block on its way, and what memory has of it when the two are
+	// compared.
+	block [BlockSize]byte
+	other [BlockSize]byte
+}
+
+// Connect says which memory the controller moves data to and from, and which
+// vector it interrupts through, 220 if that is 0.
+func (c *Controller) Connect(m Memory, vector uint16) {
+	c.memory = m
+	c.vector = vector
+	if vector == 0 {
+		c.vector = 0o220
+	}
+}
+
+// Attach puts a pack in a drive, with the drive's switch at WRITE LOCK if
+// locked says so, and takes out what is there if pack is nil. It reports
+// whether there is such a drive. It is for when the machine does not run.
+func (c *Controller) Attach(n int, pack Disk, locked bool) bool {
+	if n < 0 || n >= drives {
+		return false
+	}
+	c.drive[n] = drive{pack: pack, locked: locked}
+	return true
+}
+
+// Serve does what the controller orders, for ever. It is what the cog of the
+// disk runs.
+func (c *Controller) Serve() {
+	c.served = true
+	for {
+		if c.ordered != c.finished && !c.order.here {
+			c.work()
+		}
+	}
+}
+
+// Reset is the Device method. The order that is being done is abandoned and
+// waited for, which is a block's time at most: the transfer of a disk that
+// is reset does not go on.
+func (c *Controller) Reset() {
+	c.abandoned = c.ordered
+	for c.served && c.finished != c.ordered {
+	}
+	c.busy = false
+	c.about, c.er, c.ba, c.da = 0, 0, 0, 0
+	c.cs = done
+	c.asking, c.last, c.seeking = 0, 0, 0
+	for i := range c.drive {
+		c.drive[i].soft = false
+	}
+}
+
+// update brings the registers up to what has happened since they were last
+// looked at.
+func (c *Controller) update() {
+	if c.busy && c.finished == c.ordered {
+		c.transferred()
+	}
+	if c.seeking != 0 {
+		c.settle--
+		if c.settle == 0 {
+			c.cs |= searched
+			c.ask(c.seeking * firstDrive)
+			c.seeking = 0
+		}
+	}
+}
+
+// ask has who ask for an interrupt, unless there are to be none.
+func (c *Controller) ask(who uint16) {
+	if c.cs&enable != 0 {
+		c.asking |= who
+	} else {
+		c.asking = 0
+	}
+}
+
+// finish ends a function with the errors, and the controller is ready for
+// the next.
+func (c *Controller) finish(errors uint16) {
+	c.er |= errors
+	c.cs |= done
+	c.ask(controller)
+}
+
+// Read is the Device method.
+func (c *Controller) Read(a uint16) uint16 {
+	c.update()
+	switch a >> 1 & 7 {
+	case rkds:
+		v := c.about
+		n := c.da >> 13
+		if d := &c.drive[n]; d.pack != nil {
+			// The pack turns, a sector for every look at it.
+			c.turned = (c.turned + 1) % sectors
+			v |= highDensity | counted | ready | c.turned
+			if c.da&sector == c.turned {
+				v |= onSector
+			}
+			if d.locked || d.soft {
+				v |= writeLocked
+			}
+			if c.seeking&(1<<n) == 0 && (!c.busy || c.last != n) {
+				v |= idle
+			}
+		}
+		return v
+	case rker:
+		return c.er & implemented
+	case rkcs:
+		v := c.cs & kept
+		if c.er != 0 {
+			v |= failure
+		}
+		if c.er&hard != 0 {
+			v |= hardFailure
+		}
+		return v
+	case rkwc:
+		return c.wc
+	case rkba:
+		return c.ba
+	case rkda:
+		return c.da
+	}
+	return 0
+}
+
+// Write is the Device method. A function begins when a program sets the bit
+// for that in the control and status register of a controller that is ready,
+// and the disk address is not written while it is not.
+func (c *Controller) Write(a, v, mask uint16) {
+	c.update()
+	switch a >> 1 & 7 {
+	case rkcs:
+		old := c.cs & kept
+		v = old&^mask | v&mask
+		if v&enable == 0 {
+			c.asking = 0
+		} else if old&(done|enable) == done {
+			c.asking |= controller // ready, and now it may say so
+		}
+		c.cs = old&^writable | v&writable
+		if c.cs&done != 0 && v&start != 0 {
+			c.begin()
+		}
+	case rkwc:
+		c.wc = c.wc&^mask | v&mask
+	case rkba:
+		c.ba = (c.ba&^mask | v&mask) &^ 1
+	case rkda:
+		if c.cs&done != 0 {
+			c.da = c.da&^mask | v&mask
+		}
+	}
+}
+
+// Request is the Device method. A drive that has done seeking waits with its
+// interrupt for a controller that is ready. It is asked every few
+// instructions, and mostly of a controller that has nothing to do.
+func (c *Controller) Request() uint16 {
+	if c.busy || c.seeking != 0 {
+		c.update()
+	}
+	if c.asking != 0 && c.cs&done != 0 {
+		return c.vector
+	}
+	return 0
+}
+
+// Granted is the Device method. The controller's interrupt goes before a
+// drive's, and the drive status says which drive the interrupt is about.
+func (c *Controller) Granted(vector uint16) {
+	for n := uint16(0); n <= drives; n++ {
+		if c.asking&(1<<n) == 0 {
+			continue
+		}
+		c.asking &^= 1 << n
+		c.about = c.last << 13
+		if n != 0 {
+			c.about = (n - 1) << 13
+		}
+		return
+	}
+}
+
+// begin begins the function the control and status register names.
+func (c *Controller) begin() {
+	f := c.cs & function >> 1
+	if f == controlReset {
+		c.er, c.ba, c.da = 0, 0, 0
+		c.cs = done
+		c.asking = 0
+		return
+	}
+	c.er &^= soft
+	c.cs &^= searched | done
+	c.asking &^= controller
+	c.last = c.da >> 13
+	d := &c.drive[c.last]
+	switch {
+	case d.pack == nil:
+		c.finish(noDrive)
+		return
+	case c.seeking&(1<<c.last) != 0:
+		c.finish(driveError)
+		return
+	case c.cs&format != 0 && f != read && f != write:
+		c.finish(programming)
+		return
+	case f == write && (d.locked || d.soft):
+		c.finish(writeLock)
+		return
+	case f == lock:
+		d.soft = true
+		c.finish(0)
+		return
+	}
+
+	at := c.da &^ driveBits
+	if f == driveReset {
+		d.soft = false
+		at = 0
+		f = seek
+	}
+	switch {
+	case at&sector >= sectors:
+		c.finish(noSector)
+		return
+	case at>>5 >= cylinders:
+		c.finish(noCylinder)
+		return
+	case f == seek:
+		c.finish(0)
+		c.seeking |= 1 << c.last
+		c.settle = settling
+		return
+	}
+
+	// What is left moves data, or reads it: an order.
+	block := uint32(at>>4)*sectors + uint32(at&sector)
+	words := 0o200000 - uint32(c.wc)
+	c.trimmed = false
+	if rest := (Blocks - block) * perSector; words > rest {
+		words = rest
+		c.trimmed = true
+	}
+	c.order = order{
+		function: f,
+		control: c.cs,
+		pack: d.pack,
+		block: block,
+		words: words,
+		memory: uint32(c.cs&extension)<<12 | uint32(c.ba),
+		here: !c.served,
+	}
+	c.ordered++
+	c.busy = true
+	if c.order.here {
+		c.work()
+	}
+}
+
+// transferred brings the registers to where the order that is reported has
+// left them, and ends the function.
+func (c *Controller) transferred() {
+	c.busy = false
+	o, words := &c.order, c.report.words
+	c.wc += uint16(words)
+	memory := o.memory
+	if o.control&inhibit == 0 {
+		memory += words << 1
+	}
+	c.ba = uint16(memory) &^ 1
+	c.cs = c.cs&^extension | uint16(memory>>12)&extension
+
+	// The disk address is that of the sector after the last one touched,
+	// which for a pack read to its end is one no pack has. A header is a
+	// word a sector.
+	block := o.block + (words+perSector-1)/perSector
+	if o.function == read && o.control&format != 0 {
+		block = o.block + words
+	}
+	c.da = c.da&driveBits | uint16(block/sectors)<<4 | uint16(block%sectors)
+	errors := c.report.errors
+	if c.trimmed {
+		errors |= overrun
+	}
+	c.finish(errors)
+}
+
+// work does what is ordered and reports it. It is the only thing the cog of
+// the disk does, and what the machine's cog does itself when there is none.
+func (c *Controller) work() {
+	number := c.ordered
+	var r report
+	switch o := &c.order; o.function {
+	case read:
+		if o.control&format != 0 {
+			r = c.headers(o)
+		} else {
+			r = c.read(o, number)
+		}
+	case write:
+		r = c.write(o, number)
+	case check:
+		r = c.check(o, number)
+	case readCheck:
+		r = c.readCheck(o, number)
+	}
+	c.report = r
+	c.finished = number
+}
+
+// read moves blocks of the pack to memory. With the bus address not moving,
+// the last word of them is all that is left there.
+func (c *Controller) read(o *order, number uint32) report {
+	var r report
+	block, memory := o.block, o.memory
+	for left := o.words; left != 0 && c.abandoned != number; block++ {
+		n := min(left, perSector)
+		left -= n
+		if o.pack.Read(block, c.block[:]) != nil {
+			r.errors |= checksum
+			return r
+		}
+		if o.control&inhibit != 0 {
+			if left == 0 {
+				r.words = o.words
+				if c.memory.Store(memory, c.block[2*n-2:2*n]) == 0 {
+					r.words = 0
+					r.errors |= noMemory
+				}
+			}
+			continue
+		}
+		stored := uint32(c.memory.Store(memory, c.block[:2*n]))
+		r.words += stored / 2
+		if stored != 2*n {
+			r.errors |= noMemory
+			return r
+		}
+		memory += stored
+	}
+	return r
+}
+
+// headers is a read of the sectors' headers, a word each, which is the
+// cylinder where the disk address has it.
+func (c *Controller) headers(o *order) report {
+	var r report
+	block, memory := o.block, o.memory
+	for ; r.words < o.words; r.words++ {
+		if block >= Blocks {
+			r.errors |= overrun
+			break
+		}
+		v := block / (surfaces * sectors) << 5
+		c.block[0], c.block[1] = byte(v), byte(v>>8)
+		if c.memory.Store(memory, c.block[:2]) == 0 {
+			r.errors |= noMemory
+			break
+		}
+		if o.control&inhibit == 0 {
+			memory += 2
+		}
+		block++
+	}
+	return r
+}
+
+// write moves memory to blocks of the pack, the rest of a block that is not
+// filled being zeros. With the bus address not moving, the word there is
+// every word of them.
+func (c *Controller) write(o *order, number uint32) report {
+	var r report
+	block, memory := o.block, o.memory
+	for left := o.words; left != 0 && c.abandoned != number; block++ {
+		n := min(left, perSector)
+		left -= n
+		var fetched uint32
+		if o.control&inhibit != 0 {
+			if c.memory.Fetch(memory, c.block[:2]) != 0 {
+				fetched = 2 * n
+				for i := uint32(2); i < fetched; i++ {
+					c.block[i] = c.block[i-2]
+				}
+			}
+		} else {
+			fetched = uint32(c.memory.Fetch(memory, c.block[:2*n]))
+			memory += fetched
+		}
+		if fetched != 2*n {
+			r.errors |= noMemory
+			left = 0
+		}
+		if fetched == 0 {
+			break
+		}
+		clear(c.block[fetched:])
+		if o.pack.Write(block, c.block[:]) != nil {
+			r.errors |= driveError
+			break
+		}
+		r.words += fetched / 2
+	}
+	return r
+}
+
+// check compares blocks of the pack with memory, up to the first word that
+// differs if that is asked for.
+func (c *Controller) check(o *order, number uint32) report {
+	var r report
+	block, memory := o.block, o.memory
+	for left := o.words; left != 0 && c.abandoned != number; block++ {
+		n := min(left, perSector)
+		left -= n
+		if o.pack.Read(block, c.block[:]) != nil {
+			r.errors |= checksum
+			break
+		}
+		var fetched uint32
+		if o.control&inhibit != 0 {
+			if c.memory.Fetch(memory, c.other[:2]) != 0 {
+				fetched = 2 * n
+				for i := uint32(2); i < fetched; i++ {
+					c.other[i] = c.other[i-2]
+				}
+			}
+		} else {
+			fetched = uint32(c.memory.Fetch(memory, c.other[:2*n]))
+			memory += fetched
+		}
+		for i := uint32(0); i < fetched; i += 2 {
+			if c.block[i] != c.other[i] || c.block[i+1] != c.other[i+1] {
+				r.errors |= writeCheck
+				if o.control&stopOnSoft != 0 {
+					return r
+				}
+			}
+			r.words++
+		}
+		if fetched != 2*n {
+			r.errors |= noMemory
+			break
+		}
+	}
+	return r
+}
+
+// readCheck reads blocks of the pack to see that they can be read.
+func (c *Controller) readCheck(o *order, number uint32) report {
+	var r report
+	block := o.block
+	for left := o.words; left != 0 && c.abandoned != number; block++ {
+		n := min(left, perSector)
+		left -= n
+		if o.pack.Read(block, c.block[:]) != nil {
+			r.errors |= checksum
+			break
+		}
+		r.words += n
+	}
+	return r
+}
