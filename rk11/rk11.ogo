@@ -99,11 +99,11 @@ const (
 	controlReset = iota
 	write
 	read
-	check        // compares the pack with memory
+	check // compares the pack with memory
 	seek
-	readCheck    // reads the pack and leaves memory alone
+	readCheck // reads the pack and leaves memory alone
 	driveReset
-	lock         // the drive, until it is reset
+	lock // the drive, until it is reset
 )
 
 // The bits of the disk address register. Between the sector and the cylinder
@@ -444,12 +444,12 @@ func (c *Controller) begin() {
 	}
 	c.order = order{
 		function: f,
-		control: c.cs,
-		pack: d.pack,
-		block: block,
-		words: words,
-		memory: uint32(c.cs&extension)<<12 | uint32(c.ba),
-		here: !c.served,
+		control:  c.cs,
+		pack:     d.pack,
+		block:    block,
+		words:    words,
+		memory:   uint32(c.cs&extension)<<12 | uint32(c.ba),
+		here:     !c.served,
 	}
 	c.ordered++
 	c.busy = true

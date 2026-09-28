@@ -117,7 +117,7 @@ type Machine struct {
 	// Count is how many instructions have been executed since Reset.
 	Count uint32
 
-	now     uint32    // how far the machine has come, in instructions
+	now     uint32 // how far the machine has come, in instructions
 	psw     uint16
 	sp      [4]uint16 // the stack pointers, by mode; R[6] is the current one's
 	traps   uint16    // the traps requested and not yet taken, and attention

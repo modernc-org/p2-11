@@ -136,15 +136,15 @@ func TestTicks(t *testing.T) {
 
 // once waits for an interrupt of the clock, which counts it in R3, and halts.
 var once = [...]uint16{
-	0o012706, 0o001000,           // 1000: MOV #1000, SP
+	0o012706, 0o001000, // 1000: MOV #1000, SP
 	0o012737, 0o001034, 0o000100, // 1004: MOV #1034, @#100
 	0o012737, 0o000300, 0o000102, // 1012: MOV #300, @#102
 	0o005003,                     // 1020: CLR R3
 	0o012737, 0o000100, 0o177546, // 1022: MOV #100, @#177546
-	0o000001,                     // 1030: WAIT
-	0o000000,                     // 1032: HALT
-	0o005203,                     // 1034: INC R3
-	0o000002,                     // 1036: RTI
+	0o000001, // 1030: WAIT
+	0o000000, // 1032: HALT
+	0o005203, // 1034: INC R3
+	0o000002, // 1036: RTI
 }
 
 // A processor at the clock's priority or above it is not interrupted. The

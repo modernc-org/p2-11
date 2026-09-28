@@ -186,13 +186,13 @@ func TestConsole(t *testing.T) {
 
 func TestDeviceRegister(t *testing.T) {
 	fresh([]uint16{
-		0o012737, 0o123456, lowAt,     // MOV #123456, @#low
-		0o112737, 0o000377, lowAt,     // MOVB #377, @#low
+		0o012737, 0o123456, lowAt, // MOV #123456, @#low
+		0o112737, 0o000377, lowAt, // MOVB #377, @#low
 		0o112737, 0o000001, lowAt + 1, // MOVB #1, @#low+1
-		0o013700, lowAt,               // MOV @#low, R0
-		0o113701, lowAt + 1,           // MOVB @#low+1, R1
-		0o005237, highAt,              // INC @#high
-		0o000000,                      // HALT
+		0o013700, lowAt, // MOV @#low, R0
+		0o113701, lowAt + 1, // MOVB @#low+1, R1
+		0o005237, highAt, // INC @#high
+		0o000000, // HALT
 	})
 	tm.Step()
 	expect(t, "a word written", low.reg, 0o123456)
@@ -243,8 +243,8 @@ func TestInterrupt(t *testing.T) {
 	fresh([]uint16{
 		0o000240,                     // NOP
 		0o012737, 0o000140, 0o177776, // MOV #140, @#PSW
-		0o000240,                     // NOP, which the interrupt comes before
-		0o000777,                     // BR .
+		0o000240, // NOP, which the interrupt comes before
+		0o000777, // BR .
 	})
 	tm.SetPSW(0o200)
 	low.ringing = true
@@ -411,24 +411,24 @@ func TestWaitState(t *testing.T) {
 // HALT.
 var loop = [...]uint16{
 	0o012737, 0o001054, 0o000030, // 1000: MOV #1054, @#30
-	0o005037, 0o000032,           //           1006: CLR @#32
-	0o012700, 0o000620,           //           1012: MOV #400., R0
-	0o005001,                     //                     1016: CLR R1
-	0o004767, 0o000010,           //           1020: JSR PC, 1034
-	0o104001,                     //                     1024: EMT 1
-	0o077004,                     //                     1026: SOB R0, 1020
-	0o000000,                     //                     1030: HALT
-	0o000000,                     //
-	0o010046,                     //                     1034: MOV R0, -(SP)
-	0o060001,                     //                     1036: ADD R0, R1
-	0o006301,                     //                     1040: ASL R1
-	0o005501,                     //                     1042: ADC R1
-	0o111602,                     //                     1044: MOVB (SP), R2
-	0o074201,                     //                     1046: XOR R2, R1
-	0o005726,                     //                     1050: TST (SP)+
-	0o000207,                     //                     1052: RTS PC
-	0o005203,                     //                     1054: INC R3
-	0o000002,                     //                     1056: RTI
+	0o005037, 0o000032, //           1006: CLR @#32
+	0o012700, 0o000620, //           1012: MOV #400., R0
+	0o005001,           //                     1016: CLR R1
+	0o004767, 0o000010, //           1020: JSR PC, 1034
+	0o104001, //                     1024: EMT 1
+	0o077004, //                     1026: SOB R0, 1020
+	0o000000, //                     1030: HALT
+	0o000000, //
+	0o010046, //                     1034: MOV R0, -(SP)
+	0o060001, //                     1036: ADD R0, R1
+	0o006301, //                     1040: ASL R1
+	0o005501, //                     1042: ADC R1
+	0o111602, //                     1044: MOVB (SP), R2
+	0o074201, //                     1046: XOR R2, R1
+	0o005726, //                     1050: TST (SP)+
+	0o000207, //                     1052: RTS PC
+	0o005203, //                     1054: INC R3
+	0o000002, //                     1056: RTI
 }
 
 // A machine run in one go ends where one that is stepped ends.
@@ -529,7 +529,7 @@ func TestNow(t *testing.T) {
 	// than it has seen it.
 	fresh([]uint16{
 		0o005237, lowAt, // 1000: INC @#164000
-		0o000775,        //        1004: BR 1000
+		0o000775, //        1004: BR 1000
 	})
 	tm.Run(1000)
 	if tm.Now() != 1000 || low.reg != 500 || low.back != 0 || low.seen < 990 {
