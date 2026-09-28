@@ -12,6 +12,9 @@
 # names the module ogo.mod does -- and runs "go vet" and "go test" there, with
 # GOARCH=386 so that int is 32 bits wide as it is on the target.
 #
+# A .go file beside the .ogo files of a package goes into the twin as it is. It
+# is where a test says what only this machine has the time for.
+#
 # Its use is a fast answer about the emulator's logic, and test sets too large
 # to load onto a board. What the board does is decided on the board: ogo test.
 #
@@ -63,6 +66,11 @@ find . -name '*.ogo' -not -path './tmp/*' -not -path './guest/*' -not -path './t
 				fi
 				sed -E 's/(^|[^.[:alnum:]_])printf\(/\1fmt.Printf(/g' "$f"
 			} > "$out"
+		done
+		for f in "$dir"/*.go; do
+			if [ -e "$f" ]; then
+				cp "$f" "$twin/$f"
+			fi
 		done
 	done
 

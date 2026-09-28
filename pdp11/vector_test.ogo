@@ -13,8 +13,12 @@ const (
 	// are compared word by word. Of the rest a case names what it touches.
 	region = 0o4000
 
-	// A case is this many numbers and then three for every word it names.
-	caseSize = 2 + 2*stateSize
+	// A case is this many numbers and then three for every word it names. Its
+	// first three are these.
+	caseSteps  = 0
+	caseHalted = 1
+	caseWords  = 2
+	caseSize   = 3 + 2*stateSize
 
 	// The machine before and after is R0 to R5 and then these.
 	stateSP   = 6
@@ -44,6 +48,12 @@ var (
 	current []uint16
 	number  int
 	good    bool
+
+	// thorough says that all of memory is looked at after every case, for a
+	// word written that the case does not name. The board has not the time
+	// and looks once, after the last case. host_test.go sets it, which is Go
+	// and is compiled where scripts/twin.sh runs the tests.
+	thorough bool
 )
 
 // background is what the address a holds before a case puts its own there: the
@@ -64,35 +74,49 @@ func background(a uint16) uint16 {
 func TestVectors(t *testing.T) {
 	failures := 0
 	number = 0
-	for part := 0;; part++ {
-		v := vectors(part)
-		if len(v) == 0 {
-			break
+	for v := vectors[:]; len(v) != 0; number++ {
+		size := caseSize + 3*int(v[caseWords])
+		current = v[:size]
+		runCase()
+		if thorough && !untouched() {
+			good = false
 		}
-		for len(v) != 0 {
-			size := caseSize + 3*int(v[1])
-			current = v[:size]
-			runCase()
-			if !good {
-				t.Fail()
-				failures++
-				if failures == maxFailures {
-					println("and there may be more")
-					return
-				}
+		if !good {
+			t.Fail()
+			failures++
+			if failures == maxFailures {
+				println("and there may be more")
+				return
 			}
-			v = v[size:]
-			number++
 		}
+		v = v[size:]
+	}
+	if !untouched() {
+		t.Fail()
 	}
 	println(number, "vectors")
+}
+
+// untouched reports whether memory past the region holds nothing, which is
+// what the cases leave it holding. It says what it finds there and removes it.
+func untouched() bool {
+	ok := true
+	for i := region / 2; i < MemWords; i++ {
+		if vm.mem[i] != 0 {
+			printf("vector %d or one before it: memory at %06o %06o, which no case names\n",
+				number, 2*i, vm.mem[i])
+			vm.mem[i] = 0
+			ok = false
+		}
+	}
+	return ok
 }
 
 // runCase runs the current case and leaves in good whether the machine came
 // out of it as the reference did, having said what differs if it did not.
 func runCase() {
-	before := current[2 : 2+stateSize]
-	after := current[2+stateSize : caseSize]
+	before := current[caseSize-2*stateSize : caseSize-stateSize]
+	after := current[caseSize-stateSize : caseSize]
 	words := current[caseSize:]
 
 	for a := uint16(0); a < region; a += 2 {
@@ -116,13 +140,21 @@ func runCase() {
 	vm.R[6] = before[stateSP]
 	vm.R[7] = before[statePC]
 
-	for i := 0; i < int(current[0]); i++ {
-		if s := vm.Step(); s == Halted || s == Faulted {
-			break
-		}
+	doing := Running
+	steps := uint32(0)
+	for ; steps < uint32(current[caseSteps]) && doing == Running; steps++ {
+		doing = vm.Step()
 	}
 
 	good = true
+	if halted := current[caseHalted] != 0; halted != (doing == Halted) {
+		differs()
+		println("\tthe state is", int(doing), "and the reference halted:", halted)
+	}
+	if vm.Count != steps {
+		differs()
+		println("\tinstructions counted:", vm.Count, "in", steps, "steps")
+	}
 	for i := 0; i < stateSize; i++ {
 		if got := state(i); got != after[i] {
 			differs()
@@ -179,7 +211,7 @@ func differs() {
 	}
 	good = false
 	words := current[caseSize:]
-	pc := current[2+statePC]
+	pc := current[caseSize-2*stateSize+statePC]
 	ir := background(pc)
 	for i := 0; i < len(words); i += 3 {
 		if words[i] == pc {
@@ -187,5 +219,5 @@ func differs() {
 		}
 	}
 	printf("vector %d, instruction %06o at %06o, status word %06o, %d steps\n",
-	number, ir, pc, current[2+statePSW], current[0])
+		number, ir, pc, current[caseSize-stateSize-1], current[caseSteps])
 }

@@ -452,12 +452,22 @@ def run(simh, cases):
     with tempfile.NamedTemporaryFile('w', suffix='.ini', delete=False) as f:
         f.write('\n'.join(lines) + '\n')
     try:
-        out = subprocess.run([simh, f.name], capture_output=True, text=True, errors='replace').stdout
+        # A case takes SimH a twentieth of a second. One that waits for what
+        # never comes would take it for ever.
+        r = subprocess.run([simh, f.name], capture_output=True, text=True, errors='replace',
+                           timeout=120 + len(cases))
+    except subprocess.TimeoutExpired:
+        sys.exit('vectors.py: SimH did not come to an end')
+    except OSError as e:
+        sys.exit('vectors.py: %s: %s; scripts/tools.sh builds it' % (simh, e.strerror))
     finally:
         os.unlink(f.name)
-
-    version = re.search(r'^PDP-11 simulator (.*)$', out, re.M).group(1)
-    version = re.sub(r'\s+', ' ', version).strip()
+    out = r.stdout
+    version = re.search(r'^PDP-11 simulator (.*)$', out, re.M)
+    if r.returncode != 0 or not version or '#START\n' not in out or '#END' not in out:
+        sys.exit('vectors.py: SimH exited with %d and said\n%s%s' %
+                 (r.returncode, out[-2000:], r.stderr[-2000:]))
+    version = re.sub(r'\s+', ' ', version.group(1)).strip()
     body = out.split('#START\n', 1)[1].split('#END', 1)[0]
     chunks = body.split('#CASE ')[1:]
     if len(chunks) != len(cases):
@@ -487,17 +497,15 @@ def run(simh, cases):
 
 def usable(c):
     """Whether SimH stopped for a reason the processor has too."""
-    return c.stop.startswith('Step expired') or c.stop.startswith('HALT instruction')
+    return c.stop.startswith('Step expired') or halted(c)
+
+
+def halted(c):
+    return c.stop.startswith('HALT instruction')
 
 
 def octal(v):
     return '0o%06o' % v
-
-
-# PART is how many numbers go into one array. The C compiler behind OctoGo
-# reads an array's initializer as one line and gives up beyond 65,535
-# characters of it.
-PART = 4000
 
 
 def table(cases, version, args):
@@ -510,17 +518,15 @@ def table(cases, version, args):
         (args.n, args.scale, args.seed),
         '//',
         '// The reference is the 11/40 of SimH, %s.' % version,
-        '//',
-        '// A case is how many steps it takes and how many words of memory it names,',
-        '// the machine before and the machine after -- R0 to R5, the stack pointer,',
-        '// the kernel\'s, the user\'s, the program counter and the status word -- and',
-        '// the words: for each its address, what it holds before and what after.',
-        '// The cases come in parts, none of them larger than the C compiler behind',
-        '// OctoGo takes in one array.',
         '',
+        '// vectors is the cases, one after another. A case is how many steps it',
+        '// takes, whether the last of them is a HALT and how many words of memory',
+        '// it names; the machine before and the machine after -- R0 to R5, the',
+        '// stack pointer, the kernel\'s, the user\'s, the program counter and the',
+        '// status word -- and the words: for each its address, what it holds',
+        '// before and what after.',
+        'var vectors = [...]uint16{',
     ]
-    parts = [[]]
-    size = 0
     for i, c in enumerate(cases):
         before = c.r + [c.sp(), c.ksp, c.usp, c.pc, c.psw]
         words = []
@@ -529,21 +535,10 @@ def table(cases, version, args):
             now = c.final.get(a, 0)
             if a in c.mem or now != was:
                 words += [a, was, now]
-        nums = [c.steps, len(words) // 3] + before + c.after + words
-        if size + len(nums) > PART:
-            parts.append([])
-            size = 0
-        size += len(nums)
-        parts[-1].append('\t// %d: %06o %s' % (i, c.ir, c.text))
-        parts[-1].append('\t' + ', '.join(octal(v) if j > 1 else str(v) for j, v in enumerate(nums)) + ',')
-
-    out += ['// vectors answers the ith part of the cases, and nothing after the last.',
-            'func vectors(i int) []uint16 {', '\tswitch i {']
-    for i in range(len(parts)):
-        out += ['\tcase %d:' % i, '\t\treturn vectors%d[:]' % i]
-    out += ['\t}', '\treturn nil', '}']
-    for i, part in enumerate(parts):
-        out += ['', 'var vectors%d = [...]uint16{' % i] + part + ['}']
+        nums = [c.steps, int(halted(c)), len(words) // 3] + before + c.after + words
+        out.append('\t// %d: %06o %s' % (i, c.ir, c.text))
+        out.append('\t' + ', '.join(octal(v) if j > 2 else str(v) for j, v in enumerate(nums)) + ',')
+    out.append('}')
     return '\n'.join(out) + '\n'
 
 
@@ -564,9 +559,15 @@ def main():
     cases = systematic(rnd, args.scale) + scattered(rnd, args.n)
     version = run(args.simh, cases)
     kept = [c for c in cases if usable(c)]
-    with open(args.o, 'w') as f:
-        f.write(table(kept, version, args))
-    subprocess.run(['ogo', 'fmt', '-w', args.o], check=True)
+    new = args.o + '.new.ogo'
+    try:
+        with open(new, 'w') as f:
+            f.write(table(kept, version, args))
+        subprocess.run(['ogo', 'fmt', '-w', new], check=True)
+        os.replace(new, args.o)
+    finally:
+        if os.path.exists(new):
+            os.unlink(new)
     print('%d cases, %d of them left out: SimH stopped at them for a reason of its own' %
           (len(kept), len(cases) - len(kept)), file=sys.stderr)
     for c in cases:
