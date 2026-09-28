@@ -14,11 +14,12 @@ PDP-11.
 
 The processor, the console, the line clock and the disk are there, and RT-11
 V4 runs: it begins from a pack on the SD card and does what it does in SimH.
-There is no memory management yet, which Unix wants.
+The memory management is there too, with 248 KB of memory, and nothing runs
+yet that wants it: Unix V6 is next.
 
 ```
 $ ogo run
-303004 instructions in 2637 ms, 114904 a second
+303004 instructions in 2898 ms, 104556 a second
 60 cycles of the line clock in 988 ms
 
 PDP-11/40 on a Propeller 2, in OctoGo
@@ -54,12 +55,12 @@ RT-11SJ  V04.00C
 | the SD card's blocks, and where a file of its FAT32 volume is | there |
 | RK11 disk with RK05 drives, a file on the SD card for a pack | there |
 | RT-11 V4, the single job monitor | runs |
-| KT11-D memory management | not yet |
+| KT11-D memory management, 248 KB | there |
 
 The processor is tested against the PDP-11/40 of
-[SimH](https://opensimh.org): 2380 cases of a machine before an instruction and
-after it, on the board and on the machine the program is written on. A sweep of
-15,685 more agrees as well. The disk is tested against SimH's too, with a
+[SimH](https://opensimh.org): 2865 cases of a machine before an instruction and
+after it, 485 of them the memory management's, on the board and on the machine
+the program is written on. A sweep of 15,685 more agrees as well. The disk is tested against SimH's too, with a
 program of 35 steps, [mac/disk.mac](mac/disk.mac). And so is all of it: a talk
 with RT-11 in which a file is copied, compared and deleted says on the board
 what it says in SimH, and leaves on the card what SimH leaves in its file.
@@ -75,7 +76,7 @@ go install modernc.org/ogo@v0.44.0
 
 ```sh
 ogo run                                  # build, load, and open a terminal
-ogo build --unchecked --clock 200MHz     # as fast as it goes: 163,874 a second
+ogo build --unchecked --clock 200MHz     # as fast as it goes: 148,385 a second
 ogo test ./...                           # the tests, on the board
 scripts/twin.sh                          # the packages' tests under Go, no board needed
 scripts/talk.py                          # a talk with what is on the pack, on the board and in SimH

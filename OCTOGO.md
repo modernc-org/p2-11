@@ -14,8 +14,9 @@ has put things.
 An entry is removed when `ogo` no longer shows it and the emulator no longer
 works around it. What was found and is closed is at the end, by name.
 
-The two that are open are one: what the backend makes of the C it is given. A
-call is dear, and what is not inlined is called.
+Of the three that are open, the first two are one: what the backend makes of
+the C it is given. A call is dear, and what is not inlined is called. The third
+is a statement the parser does not take.
 
 ## 1. A function with a branch in it is called, and a call is dear
 
@@ -91,6 +92,18 @@ one is in turn too large to be inlined itself.
 
 The emulator as it is now loses less to them, its checks being few a call:
 114,904 instructions a second checked and 131,113 unchecked.
+
+## 3. An `if` that begins with a call is a syntax error
+
+```go
+if two(); ok {
+```
+
+is refused, `two` being a function, with "expected [AssignOp '{' '=' ...]".
+Go takes any simple statement before the condition, a call among them. Met on
+2026-09-29 in a test that wanted a call's results discarded and a condition
+looked at after it, and written with names for the results instead; the
+tree's compiler of that day refuses it as well.
 
 ## Found here and closed
 

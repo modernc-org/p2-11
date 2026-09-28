@@ -10,7 +10,7 @@ p2-11 is a PDP-11 emulator for the Parallax Propeller 2 (P2), written in OctoGo.
 2. To find what OctoGo is missing or gets wrong. What was found is in `OCTOGO.md`.
 3. Fun.
 
-**Status, 2026-09-28.** The processor, the console and the line clock exist. A program on the board says what it is, sizes memory by trapping, and echoes what is typed with the receiver interrupting; another waits for sixty interrupts of the clock, which take a second. The processor agrees with SimH's 11/40 on every one of the 2380 cases in the repository and of the 15,685 of a sweep. The disk controller exists, with files on the SD card for its packs, and does on the board what SimH's does with a program of 35 steps. The machine begins with RT-11 V4 on a pack, on the board as under the twin, and says in a talk of nine commands what SimH says, and leaves the pack as SimH leaves it. There is no memory management, so nothing that wants it runs: Unix is next after it. Keep this file in step as code lands, and delete what stops being true.
+**Status, 2026-09-28.** The processor, the console and the line clock exist. A program on the board says what it is, sizes memory by trapping, and echoes what is typed with the receiver interrupting; another waits for sixty interrupts of the clock, which take a second. The processor agrees with SimH's 11/40 on every one of the 2865 cases in the repository, of which 485 are the memory management's, and of the 15,685 of a sweep made before it had any. The disk controller exists, with files on the SD card for its packs, and does on the board what SimH's does with a program of 35 steps. The machine begins with RT-11 V4 on a pack, on the board as under the twin, and says in a talk of nine commands what SimH says, and leaves the pack as SimH leaves it. The KT11-D memory management exists since 2026-09-29, with 248 KB of memory, and costs a tenth of the speed with the unit off and an eighth more with it on. Nothing that wants it runs yet: Unix V6 is next. Keep this file in step as code lands, and delete what stops being true.
 
 ## OctoGo
 
@@ -186,14 +186,16 @@ Only the root, `card` and `sd` know the Propeller 2. The others are Go once they
 
 **The order of things inside an instruction is the 11/40's**, down to what is left behind when an access fails halfway, and that is what the vectors hold the code to. SimH's `pdp11_cpu.c` was the reference for behaviour; nothing of it is copied.
 
+**Memory management** is the KT11-D, in `pdp11/mmu.ogo`: what a page's two registers come to is worked out when they are written, into a `page` with where it begins and what offsets and cycles it admits, so that `read` and `write` do their arithmetic once, inline; `space` says whose pages an access goes through, the current mode's but while MFPI and MTPI reach into the previous mode's and a trap into the kernel's. A read that will be written back asks the page for writing, as the bus cycle DATIP does, so that an abort comes before the read. `Run` keeps SR0 and the page the program is in in registers, since a write to a register of the unit and a change of mode ask for attention, which ends its run of instructions; that is what took the unit's cost from a third to an eighth. The console, `Examine` and `Deposit`, reads memory as it is on the bus, whatever the map says, and so do `Fetch` and `Store`, whose addresses are the bus's 18 bits. There is no SR1: 177574 answers nothing, as on the 11/40.
+
 **The code is shaped by what a call costs** (`OCTOGO.md`, 1). `Run` fetches where it stands, `execute` finds the instruction's function, an operand in a register is dealt with where it is met, and `read`, `write` and `address` are called for operands in memory only. There are no helpers that only test something. Do not "tidy" that into small methods without measuring: the first version was written that way and ran a fifth as fast.
 
 ## Tests
 
-- **The vectors**, `pdp11/vector_test.ogo` over `pdp11/vectors_test.ogo`: 2380 cases of a machine before and after one or two steps, the after being what SimH's 11/40 made of it, with whether it halted. They go through every instruction and addressing mode, the traps, the status word at its address, the stack limit, and 300 cases of whatever sixteen bits came up.
-- **By hand**: `pdp11/machine_test.ogo` for the bus, interrupts, the console's switches, what `Run` answers and that a program run ends where the same program stepped ends, with a device of its own; `dl11/dl11_test.ogo` for the line by itself and for the line as console of a machine that runs `mac/demo.mac`, whose output is compared with what it says in SimH; `kw11/kw11_test.ogo` for the clock by itself and for the clock on a machine, which runs `mac/ticks.mac` to where it ends in SimH, and keeps the cycles that pass while the processor's priority holds them back for one interrupt, as SimH does.
+- **The vectors**, `pdp11/vector_test.ogo` over `pdp11/vectors_test.ogo`: 2865 cases of a machine before and after one or two steps, the after being what SimH's 11/40 made of it, with whether it halted. They go through every instruction and addressing mode, the traps, the status word at its address, the stack limit, and 300 cases of whatever sixteen bits came up. Every case begins with the registers of the memory management holding a background, each page where its address says and the unit off, and names the registers it sets and those that changed, SR2 among them after every case; one case in eight has the unit on. The 485 cases that are the unit's put operands in pages that are elsewhere, through every addressing mode; abort in every way there is, a page not there, read-only or shorter than the address, growing either way, on a read, a write and a read that will be written back, in both modes, and see in the second step what the trap left frozen; fetch an instruction or the word after it from such a page; reach into the previous mode's space with MFPI and MTPI; and read and write every register, in words and bytes. SimH's 11/40 has an SR1 at 177574 that no 11/40 had, so the generator keeps cases off it as it keeps them off the console.
+- **By hand**: `pdp11/machine_test.ogo` for the bus, interrupts, the console's switches, what `Run` answers and that a program run ends where the same program stepped ends, with a device of its own, and for what the vectors cannot reach of the memory management: the console reading memory beneath the map and a trap from the user's space taking its vector and its stack through the kernel's; `dl11/dl11_test.ogo` for the line by itself and for the line as console of a machine that runs `mac/demo.mac`, whose output is compared with what it says in SimH; `kw11/kw11_test.ogo` for the clock by itself and for the clock on a machine, which runs `mac/ticks.mac` to where it ends in SimH, and keeps the cycles that pass while the processor's priority holds them back for one interrupt, as SimH does.
 - **The card**: `fat/fat_test.ogo` finds files on a disk that is made up block by block as it is read, with a directory in two clusters that are not neighbours and files in one piece and in several, under the twin and on the board. `sd/sd_test.ogo` reads the card in the slot and writes nothing. `card_test.ogo` in the root reads all of `TEST.DSK` and compares it, and writes seventeen blocks of it, reads them and puts back what they had. The last two run on the board only, and pass on a board with no card, or no such file, saying that nothing was tested.
-- **The disk**: `mac/disk.mac` has the controller do 35 things, among them every function, every error a program can cause, interrupts, and registers written a byte at a time, and writes the registers after each into a table. `scripts/rk.py` has SimH make that table, and `rk11/rk11_test.ogo` compares: with the controller doing the transfers itself, and with the test as the cog of the disk after every 1, 7, 49 and 343 instructions. What the program cannot ask is tested by hand: a pack that fails, a drive that is busy, a pack taken out, and the bootstrap, which leaves in SimH what it leaves here. `disk_test.ogo` in the root runs the program with the cog of the disk and `TEST.DSK` on the card, on the board only.
+- **The disk**: `mac/disk.mac` has the controller do 35 things, among them every function, every error a program can cause, interrupts, and registers written a byte at a time, and writes the registers after each into a table. Memory ends for it where the bus ends, at 760000, which the extension bits of the control register reach, so SimH is given 248 KB for it and the machines that run it have as much. `scripts/rk.py` has SimH make that table, and `rk11/rk11_test.ogo` compares: with the controller doing the transfers itself, and with the test as the cog of the disk after every 1, 7, 49 and 343 instructions. What the program cannot ask is tested by hand: a pack that fails, a drive that is busy, a pack taken out, and the bootstrap, which leaves in SimH what it leaves here. `disk_test.ogo` in the root runs the program with the cog of the disk and `TEST.DSK` on the card, on the board only.
 - **A system**: `rk11/host_test.go` is Go, for the twin only, and is skipped where `guest/RK0.DSK` or SimH is not. It has the machine begin with the pack and holds a talk with RT-11 in which a file is copied, compared and deleted, has SimH do the same, and compares what the two consoles said and what the two packs then hold. Each command waits for the prompt after the one before it, so that nothing is typed into what the system says. It found the console's pace, which no test of the project's own programs had: they wait for a character and have done with it before the next.
 - **A system on the board**: `scripts/talk.py` holds that talk with the board, through the loader's terminal, and with SimH, and compares what the two have said. On 2026-09-28 they said the same 1558 bytes, in the three builds, and the pack on the card was then what SimH's copy was: a program made for the day read the file from the card and summed it, and the sums were those of the copy. A talk leaves the pack so that the next one says the same. What the pack on the card holds is compared with the file by `scripts/card.py sum RK0.DSK guest/RK0.DSK`, which names the blocks that differ: after a talk, blocks 8 to 9 and 38 to 45, the second directory segment and the swap area, and 1423 to 1458, where the copied file was.
 - **Between cogs**, `cogs_test.ogo` in the root: 20,000 bytes each way through the console with the cog of the other end running at once, and resets with a byte on its way; and the clock with the program's own cog counting, by which `mac/ticks.mac` is to take a second. The tests of `dl11` are one cog taking the part of three in turn; this is the only place that asks whether a cog sees what another wrote, in the order it was written. It runs on the board only.
@@ -211,17 +213,17 @@ A review by the Codex agent on 2026-09-27 found four faults the tests had not, a
 
 P2-EC, `mac/bench.mac`: 303,004 instructions, of which a third each are `ADD R2,(R1)+`, `INC R3` and `SOB`.
 
-| Build | Instructions a second |
-| --- | --- |
-| checked, 160 MHz | 114,904 |
-| `--unchecked`, 160 MHz | 131,113 |
-| `--unchecked --clock 200MHz` | 163,874 |
+| Build | Instructions a second | With memory management on |
+| --- | --- | --- |
+| checked, 160 MHz | 104,556 | 89,778 |
+| `--unchecked`, 160 MHz | 118,685 | 103,379 |
+| `--unchecked --clock 200MHz` | 148,385 | 129,212 |
 
-That is with `ogo` v0.44.0, the console, the clock and the disk on the bus, and the machine counting how far it has come. With the compilers of the same day before it, the three ran 120,287, 134,369 and 167,962 with the console alone, 119,811, 133,071 and 166,302 with the console and the clock, 116,629, 133,364 and 166,760 with the disk as well, and 116,540, 131,455 and 164,318 with the count. A device more to ask every `pollEvery` instructions costs about 1%, and so does where the build has put things: with the disk in the program and not on the bus the first two ran 117,762 and 131,912.
+That is with `ogo` v0.44.0 on 2026-09-29, the console, the clock and the disk on the bus, the machine counting how far it has come, and its memory management, with the pages where their addresses say when it is on. The day before, without the unit, the three ran 114,904, 131,113 and 163,874, which is what the unit costs with the unit off: a tenth, of which the paragraph on memory above says what is what. With the compilers of the same day before it, the three ran 120,287, 134,369 and 167,962 with the console alone, 119,811, 133,071 and 166,302 with the console and the clock, 116,629, 133,364 and 166,760 with the disk as well, and 116,540, 131,455 and 164,318 with the count. A device more to ask every `pollEvery` instructions costs about 1%, and so does where the build has put things: with the disk in the program and not on the bus the first two ran 117,762 and 131,912.
 
 Sixty interrupts of the clock take 985 to 999 ms from when the program enables them, the first cycle being under way by then.
 
-The talk with RT-11, from the loader's first byte to the last prompt, of which six seconds are the loader, the benchmark and the clock's second: 36 s checked, 32 s `--unchecked`, and 26 s `--unchecked --clock 200MHz`.
+The talk with RT-11, from the loader's first byte to the last prompt, of which six seconds are the loader, the benchmark and the clock's second: 36 s checked, 32 s `--unchecked`, and 26 s `--unchecked --clock 200MHz`, before the memory management; with it and the binary of 365 KB, 45, 39 and 32 s.
 
 A pack onto the card with `scripts/card.py`: 4872 blocks in 113 s, which is the rate of the line at 230400 baud with a block's header and its escaped bytes, and 15 s more for the build, the load and the reading back. To sum the pack on the card against a file takes 15 s in all.
 
@@ -237,7 +239,7 @@ To write one takes 2.5 to 5 ms, most of which is the card's. All of `TEST.DSK` i
 
 In clocks at 160 MHz, `--unchecked`: a call and its return 75 to 115; a field of the machine read and tested, 30; a `switch`, about 5 for every case it passes. A function with a branch in it is never inlined. The measurements and their programs are in `OCTOGO.md`. Measure again after an `ogo` upgrade before relying on any of it: the compiler of 2026-09-28 made the emulator 6 to 8% faster by making a named constant its value, where the three before it had agreed to within 2%.
 
-Guest RAM as `[N]uint16` makes a word access one `rdword` or `wrword`. A 248 KB array at package scope builds and runs; it is part of the binary image, which is then 263 KB to load.
+Memory is a slice the program gives the machine with `Memory`, and the program's is a 248 KB array at package scope, which is part of the binary image: 365 KB to load. It was an array in the `Machine` of 56 KB, which made a word access one `rdword`; a `Machine` of 248 KB does not fit beside the vectors in a test binary, and the tests want machines of their own size. With the slice an access reads its pointer and its length, and the enable bit of the memory management before them, and every instruction writes SR2: measured one by one on 2026-09-29, `--unchecked`, SR2's write is 2.4% of the speed, the enable bit 2.1%, the length 1.3% and the slice the rest of the tenth.
 
 ## The emulated machine
 
@@ -256,17 +258,17 @@ What there is of it:
 | --- | --- |
 | KD11-A instructions, KE11-E (MUL, DIV, ASH, ASHC) | done |
 | traps, the trace bit, the fixed stack limit at 400 | done |
-| kernel and user mode with a stack pointer each, MFPI and MTPI | done, as far as they go without memory management |
+| kernel and user mode with a stack pointer each, MFPI and MTPI | done |
 | the status word at 177776, the switch register at 177570 | done |
 | DL11 console | done |
 | KW11-L line clock | done |
 | the SD card, and a file's place on its FAT32 volume | done |
 | RK11 disk controller, with files on the card for packs | done |
 | RT-11 V4, single job | begins, and does in a talk of nine commands what it does in SimH |
-| KT11-D memory management, 248 KB | not started |
+| KT11-D memory management, 248 KB | done, 2026-09-29 |
 | FIS, the floating point processor | not planned: their instructions trap as on a machine without them |
 
-What the 11/40 does in its own way, all of it in the vectors: a register source is read after the destination is decoded, so `MOV R0,(R0)+` stores the stepped value; `JMP` and `JSR` to a register trap through 4, not 10; a program cannot write the trace bit at 177776; `HALT` in user mode traps through 10; the stack limit is fixed and only ever a trap after the instruction.
+What the 11/40 does in its own way, all of it in the vectors: a register source is read after the destination is decoded, so `MOV R0,(R0)+` stores the stepped value; `JMP` and `JSR` to a register trap through 4, not 10; a program cannot write the trace bit at 177776; `HALT` in user mode traps through 10; the stack limit is fixed and only ever a trap after the instruction. Its memory management has an access control field of two bits, no SR1 and no trap that lets an access through, and aborts a read that will be written back before the read; SR2 is loaded at every fetch, the unit on or off, and held with SR0's page and mode while an error bit is set.
 
 Reference facts. Addresses are 16-bit and octal; both `0o177560` and `0177560` compile.
 
@@ -275,6 +277,7 @@ Reference facts. Addresses are 16-bit and octal; both `0o177560` and `0177560` c
 | DL11 console | RCSR 177560, RBUF 177562, XCSR 177564, XBUF 177566 | 060 in, 064 out | 4 |
 | KW11-L clock | LKS 177546 | 100 | 6 |
 | RK11 disk | RKDS 177400, RKER 177402, RKCS 177404, RKWC 177406, RKBA 177410, RKDA 177412, RKDB 177416 | 220 | 5 |
+| KT11-D memory management | SR0 177572, SR2 177576; kernel PDR 172300 to 172316 and PAR 172340 to 172356; user PDR 177600 to 177616 and PAR 177640 to 177656 | 250, an abort | |
 
 The I/O page is the top 8 KB of the address space, 160000 to 177777. Without memory management that leaves 56 KB of RAM; with the 18-bit KT11-D, 248 KB. An RK05 pack is 203 cylinders of 2 surfaces of 12 sectors of 256 words: 4872 blocks, 2,494,464 bytes. The PDP-11 and the P2 are both little-endian.
 
@@ -285,7 +288,7 @@ No disk image, ROM dump or other guest software is committed, whatever its licen
 - DEC software (RT-11, RSX-11, RSTS/E, the diagnostics) is not redistributable. The Mentec hobbyist license grants use "solely for personal, non-commercial uses in conjunction with the EMULATOR" and defines that emulator as "software owned by Digital Equipment Corporation", so by its letter it does not cover this one. Do not download DEC software unasked; whether and which kit to use is the user's decision.
 - Research Unix V1 to V7 is under the Caldera license, a 4-clause BSD license with an advertising clause. It may be fetched, and redistributed with its notice.
 
-What is in `guest/` since 2026-09-28, put there by the user: `rt11swre.tar.Z`, RT-11 V4 on RK05 from SimH's software kits, with the license quoted above. `guest/rt11v4/` is the kit unpacked, whose `rtv4_rk.dsk` is of 3267 blocks, and `guest/RK0.DSK` that pack made a whole one, 2,494,464 bytes, which is what goes to the card. SimH begins with it as an 11/40 without memory management and 28K words: RT-11SJ V04.00C.
+What is in `guest/` since 2026-09-28, put there by the user: `rt11swre.tar.Z`, RT-11 V4 on RK05 from SimH's software kits, with the license quoted above. `guest/rt11v4/` is the kit unpacked, whose `rtv4_rk.dsk` is of 3267 blocks, and `guest/RK0.DSK` that pack made a whole one, 2,494,464 bytes, which is what goes to the card. SimH begins with it as an 11/40 with 28K words: RT-11SJ V04.00C.
 
 The programs in `mac/` are the project's own.
 
