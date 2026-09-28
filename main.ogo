@@ -79,13 +79,9 @@ func line() {
 func attach() bool {
 	console.Pace(&machine, apart)
 	disk.Connect(&machine, 0)
-	if !machine.Attach(&clock, 0o177546, kw11.Size, 6) {
-		return false
-	}
-	if !machine.Attach(&disk, 0o177400, rk11.Size, 5) {
-		return false
-	}
-	return machine.Attach(&console, 0o177560, dl11.Size, 4)
+	return machine.Attach(&clock, 0o177546, kw11.Size, 6) &&
+		machine.Attach(&disk, 0o177400, rk11.Size, 5) &&
+		machine.Attach(&console, 0o177560, dl11.Size, 4)
 }
 
 // run loads a program, starts it, and runs the machine until it halts. It
