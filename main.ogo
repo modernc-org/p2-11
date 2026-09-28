@@ -6,22 +6,29 @@
 // line the program was loaded through, so the terminal of "ogo run" is the
 // terminal of the PDP-11.
 //
-// The machine takes three cogs. One steps the processor. One does nothing but
+// The machine takes four cogs. One steps the processor. One does nothing but
 // read the serial line, because a byte that arrives while a cog is elsewhere
 // is lost. One writes the serial line, a byte taking as long to leave as forty
-// or so instructions take to execute.
+// or so instructions take to execute. One counts the cycles of a power line
+// there is none of, for the line clock.
 
 import (
 	"p2"
 
 	"modernc.org/p2-11/dl11"
+	"modernc.org/p2-11/kw11"
 	"modernc.org/p2-11/mac"
 	"modernc.org/p2-11/pdp11"
 )
 
+// hz is how many cycles a second the power line has: sixty where the PDP-11
+// comes from, and what its software expects unless it is told otherwise.
+const hz = 60
+
 var (
 	machine pdp11.Machine
 	console dl11.Line
+	clock   kw11.Clock
 )
 
 // receive hands the console what arrives on the serial line.
@@ -37,6 +44,30 @@ func transmit() {
 		p2.WriteByte(console.Next())
 		console.Sent()
 	}
+}
+
+// line tells the clock of every cycle of the power line. A cycle is timed from
+// when its second began and not from the cycle before it, so that what one is
+// late by is not added to the next, and hz of them are a second to the
+// microsecond. A cycle that is over before it is waited for is not waited for.
+func line() {
+	second := p2.GetUs()
+	for {
+		for i := uint32(1); i <= hz; i++ {
+			p2.WaitUs(int(second + i*1000000/hz - p2.GetUs()))
+			clock.Tick()
+		}
+		second += 1000000
+	}
+}
+
+// attach puts the devices on the machine's bus. It reports whether there was
+// room for them.
+func attach() bool {
+	if !machine.Attach(&clock, 0o177546, kw11.Size, 6) {
+		return false
+	}
+	return machine.Attach(&console, 0o177560, dl11.Size, 4)
 }
 
 // run loads a program, starts it, and runs the machine until it halts. It
@@ -61,18 +92,24 @@ func run(at, start uint16, program []uint16) bool {
 }
 
 func main() {
-	if !machine.Attach(&console, 0o177560, dl11.Size, 4) {
-		println("no room on the bus for the console")
+	if !attach() {
+		println("no room on the bus")
 		return
 	}
 	go receive()
 	go transmit()
+	go line()
 
 	t := p2.GetMs()
 	run(mac.BenchAt, mac.BenchStart, mac.Bench[:])
 	t = p2.GetMs() - t
 	n := machine.Count
 	printf("\r\n%d instructions in %d ms, %d a second\r\n", n, t, uint64(n)*1000/uint64(t))
+
+	t = p2.GetMs()
+	run(mac.TicksAt, mac.TicksStart, mac.Ticks[:])
+	t = p2.GetMs() - t
+	printf("%d cycles of the line clock in %d ms\r\n", machine.R[3], t)
 
 	run(mac.DemoAt, mac.DemoStart, mac.Demo[:])
 	printf("PC %06o\r\n", machine.R[7])

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"modernc.org/p2-11/dl11"
+	"modernc.org/p2-11/mac"
 )
 
 // The console between cogs that run at once. The tests of dl11 are one cog
@@ -20,6 +21,7 @@ const (
 	rbuf = 0o177562
 	xcsr = 0o177564
 	xbuf = 0o177566
+	lks  = 0o177546
 	done = 0o200
 
 	// traffic is how many bytes go each way, and pace how many microseconds
@@ -106,6 +108,46 @@ func TestCogsTransmit(t *testing.T) {
 	}
 	if sent != traffic || taken != traffic || garbled != 0 {
 		println("sent", sent, "of", traffic, "bytes,", taken, "were taken,", garbled, "of them wrong")
+		t.Fail()
+	}
+}
+
+// The clock, with the cog of the program counting the cycles: the machine runs
+// the program of mac/ticks.mac, which waits for sixty of them. The first comes
+// when it comes, and the sixtieth fifty-nine cycles after it, so they take a
+// second less a cycle at the least and a second at the most, and a
+// millisecond is allowed for what is not the clock's.
+func TestCogsClock(t *testing.T) {
+	if !attach() {
+		println("no room on the bus")
+		t.Fail()
+		return
+	}
+	go line()
+
+	start := p2.GetMs()
+	halted := run(mac.TicksAt, mac.TicksStart, mac.Ticks[:])
+	ms := p2.GetMs() - start
+	if !halted || machine.R[3] != hz || ms < 1000-1000/hz-1 || ms > 1001 {
+		println("halted:", halted, "after", machine.R[3], "cycles and", ms, "ms")
+		t.Fail()
+	}
+
+	// And this cog looking at the register all the time, for a second, sees
+	// every cycle once. Where the second begins and ends is known to the
+	// millisecond, which is a cycle more or less.
+	clock.Reset()
+	clock.Write(lks, 0, 0xffff)
+	cycles := 0
+	start = p2.GetMs()
+	for p2.GetMs()-start < 1000 {
+		if clock.Read(lks)&done != 0 {
+			clock.Write(lks, 0, 0xffff)
+			cycles++
+		}
+	}
+	if cycles < hz-1 || cycles > hz+1 {
+		println(cycles, "cycles in a second")
 		t.Fail()
 	}
 }
