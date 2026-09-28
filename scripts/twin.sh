@@ -74,6 +74,9 @@ find . -name '*.ogo' -not -path './tmp/*' -not -path './guest/*' -not -path './t
 		done
 	done
 
+# Where a test that begins with a pack finds it, and SimH, if they are there.
+export P2_11_ROOT=${P2_11_ROOT:-$root}
+
 cd "$twin"
 if [ $# -eq 0 ]; then
 	set -- ./...
