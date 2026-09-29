@@ -151,8 +151,33 @@ sum RK0.DSK RK0.DSK` says which of its blocks differ from the image.
 ## Software for it
 
 None is in this repository and none will be. What runs on a PDP-11 is, for the
-most part, not free to pass on; what is, the early Unix versions among it, will
-be fetched from where it is kept.
+most part, not free to pass on; what is, the early Unix versions among it, is
+fetched from where it is kept.
+
+Unix V6 is in SimH's software kits, as
+[uv6swre.zip](https://simh.trailing-edge.com/kits/uv6swre.zip): four RK05 packs,
+under the Caldera license that is in the zip. Its root pack, `unix0_v6_rk.dsk`,
+is `RK0.DSK`, made a whole pack as above. The pack has two faults: its free
+list holds block 654 three times, so that files written after it boots share a
+block and the C compiler fails, and `/tmp` still has a temporary file of the
+compiler's from 1994. Both are put right once, on the board, before anything
+else is done with the pack:
+
+```
+@rkunix.40
+
+login: root
+# rm -f /tmp/ctm0a
+# sync
+# icheck -s /dev/rk0
+/dev/rk0:
+#
+```
+
+Then the terminal is left, Ctrl-], and nothing else is typed first: until the
+board is reset the system keeps the old free list, and the next file written
+puts it back. After that `icheck /dev/rk0` finds nothing wrong, and `cc`
+compiles.
 
 ## License
 
