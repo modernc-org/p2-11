@@ -60,6 +60,11 @@ hello, world
 #
 ```
 
+The `@` is the bootstrap of Unix asking for a file to load and start:
+`rkunix.40` is the kernel built for the 11/40, while `rkunix` and `unix` are
+the 11/45's and halt it. `root` logs in with no password. Only the root pack is
+used, so what V6 keeps on its other packs, the manual among it, is not there.
+
 | | |
 | --- | --- |
 | KD11-A processor with the KE11-E extended instruction set | there |
