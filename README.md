@@ -12,10 +12,10 @@ PDP-11.
 
 ## Status
 
-The processor, the console, the line clock and the disk are there, and RT-11
-V4 runs: it begins from a pack on the SD card and does what it does in SimH.
-The memory management is there too, with 248 KB of memory, and nothing runs
-yet that wants it: Unix V6 is next.
+The processor, the console, the line clock, the disk and the memory
+management are there, with 248 KB of memory, and two systems run from a pack
+on the SD card: RT-11 V4, and Unix V6, which logs in, compiles a C program
+with its own compiler and runs it, on the board as in SimH.
 
 ```
 $ ogo run
@@ -46,6 +46,20 @@ RT-11SJ  V04.00C
 .
 ```
 
+or, with the root pack of Unix V6 there instead:
+
+```
+RK0.DSK is the pack in drive 0
+...
+@rkunix.40
+
+login: root
+# cc hello.c
+# a.out
+hello, world
+#
+```
+
 | | |
 | --- | --- |
 | KD11-A processor with the KE11-E extended instruction set | there |
@@ -55,6 +69,7 @@ RT-11SJ  V04.00C
 | the SD card's blocks, and where a file of its FAT32 volume is | there |
 | RK11 disk with RK05 drives, a file on the SD card for a pack | there |
 | RT-11 V4, the single job monitor | runs |
+| Unix V6 | runs, and compiles |
 | KT11-D memory management, 248 KB | there |
 
 The processor is tested against the PDP-11/40 of
@@ -63,7 +78,9 @@ after it, 485 of them the memory management's, on the board and on the machine
 the program is written on. A sweep of 15,685 more agrees as well. The disk is tested against SimH's too, with a
 program of 35 steps, [mac/disk.mac](mac/disk.mac). And so is all of it: a talk
 with RT-11 in which a file is copied, compared and deleted says on the board
-what it says in SimH, and leaves on the card what SimH leaves in its file.
+what it says in SimH, and leaves on the card what SimH leaves in its file;
+and a talk with Unix V6 in which a C program is written, compiled and run
+says on the board what it says in SimH.
 
 ## Running it
 
@@ -79,7 +96,8 @@ ogo run                                  # build, load, and open a terminal
 ogo build --unchecked --clock 200MHz     # as fast as it goes: 148,385 a second
 ogo test ./...                           # the tests, on the board
 scripts/twin.sh                          # the packages' tests under Go, no board needed
-scripts/talk.py                          # a talk with what is on the pack, on the board and in SimH
+scripts/talk.py                          # a talk with RT-11 on the pack, on the board and in SimH
+scripts/talk.py -talk v6                 # and one with Unix V6
 scripts/card.py put RK0.DSK RK0.DSK      # a pack onto the card, through the board
 ```
 
@@ -109,7 +127,8 @@ What writing it found out about OctoGo is in [OCTOGO.md](OCTOGO.md).
 
 ## A disk
 
-A pack is a file on the card: `RK0.DSK` for drive 0, and so on to `RK7.DSK`.
+A pack is a file on the card: `RK0.DSK` for drive 0, and so on to `RK7.DSK`,
+and the machine begins with what is in drive 0, RT-11 or Unix as the file is.
 The card is an SD card of any size with a FAT32 volume, and the file is an
 image of an RK05 pack, 2,494,464 bytes, copied to a card that has not had a
 file deleted, so that it is in one piece.
