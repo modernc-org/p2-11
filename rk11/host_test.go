@@ -53,6 +53,10 @@ func (f *file) Write(block uint32, p []byte) error {
 	return nil
 }
 
+// pause is how many instructions pass between what is waited for and what
+// is typed: a quarter of a second of the board's.
+const pause = 25000
+
 // A line is what is waited for and what is typed when it has come. What is
 // waited for ends with the prompt, so that nothing is typed into what the
 // system is saying: it says what is typed when it is typed.
@@ -75,6 +79,30 @@ var rt11 = []line{
 	{"free slots\r\n\r\n\r\n.", ""},
 }
 
+// v6 is a talk with Unix V6, which begins with the kernel of SimH's kit that
+// was made for the 11/40, on the kit's root pack with its free list mended,
+// which CLAUDE.md tells of. A program is written, compiled and run. Nothing
+// said depends on the time, which the two machines keep differently, nor on
+// what a talk before it left: the compiler's temporary files give /tmp the
+// time of the talk. The pack is not compared afterwards, every file read
+// having its time of access written.
+var v6 = []line{
+	{"@", "rkunix.40\n"},
+	{"login: ", "root\n"},
+	{"# ", "ls /\n"},
+	{"# ", "ls -l /lib\n"},
+	{"# ", "cat /etc/passwd\n"},
+	{"# ", "echo 'main(){printf(\"hello, world\\n\");}' > hello.c\n"},
+	{"# ", "cat hello.c\n"},
+	{"# ", "cc hello.c\n"},
+	{"# ", "a.out\n"},
+	{"# ", "rm hello.c a.out\n"},
+	{"# ", "sum /etc/passwd\n"},
+	{"# ", "sync\n"}, // what is still in the buffers goes to the pack before the next load resets the board
+	{"# ", "sync\n"},
+	{"# ", ""},
+}
+
 // guest answers the pack of that name, or skips the test if there is none.
 func guest(t *testing.T, name string) []byte {
 	data, err := os.ReadFile(filepath.Join(os.Getenv("P2_11_ROOT"), "guest", name))
@@ -95,13 +123,12 @@ func guest(t *testing.T, name string) []byte {
 func here(t *testing.T, pack []byte, talk []line) []byte {
 	var (
 		machine pdp11.Machine
-		memory  [28 * 1024]uint16 // what SimH is given
 		console dl11.Line
 		clock   kw11.Clock
 		disk    Controller
 		said    bytes.Buffer
 	)
-	machine.Memory(memory[:])
+	machine.Memory(make([]uint16, pdp11.MaxWords)) // all there is, as SimH is given
 	console.Pace(&machine, 1000)
 	disk.Connect(&machine, 0)
 	disk.Attach(0, &file{pack}, false)
@@ -133,6 +160,17 @@ func here(t *testing.T, pack []byte, talk []line) []byte {
 				return said.Bytes()
 			}
 		}
+		// Not at once: a program that has just prompted may still be
+		// setting up its terminal, and what comes before that is flushed.
+		// A person takes longer than these instructions do.
+		for n := 0; n < pause/2000; n++ {
+			machine.Run(2000)
+			clock.Tick()
+			for console.Pending() {
+				said.WriteByte(console.Next() & 0x7f)
+				console.Sent()
+			}
+		}
 		for i := 0; i < len(l.typed); i++ {
 			console.Put(l.typed[i])
 		}
@@ -157,7 +195,7 @@ func there(t *testing.T, pack []byte, talk []line) []byte {
 	if err := os.WriteFile(image, pack, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	lines := []string{"set cpu 11/40", "set cpu 56K"}
+	lines := []string{"set cpu 11/40", "set cpu 256K"} // 248 KB, all an 11/40 can have
 	for _, device := range strings.Fields("rha ptr ptp lpt dz rl hk rx rp rq tm tq rom") {
 		lines = append(lines, "set "+device+" disabled")
 	}
@@ -178,7 +216,7 @@ func there(t *testing.T, pack []byte, talk []line) []byte {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, simh, ini).Output()
 	_, body, begun := bytes.Cut(out, []byte("#START\n"))
@@ -233,5 +271,16 @@ func TestRT11(t *testing.T) {
 	if bytes.Equal(ours, pack) {
 		t.Error("nothing was written to the pack")
 	}
+	t.Logf("the console has said:\n%s", said)
+}
+
+func TestV6(t *testing.T) {
+	pack := guest(t, "UNIX0.DSK")
+	said := here(t, bytes.Clone(pack), v6)
+	if t.Failed() {
+		t.Fatalf("the console has said:\n%s", said)
+	}
+	said = bytes.ReplaceAll(said, []byte{0}, nil)
+	differ(t, "what the console has said", said, there(t, bytes.Clone(pack), v6), 60)
 	t.Logf("the console has said:\n%s", said)
 }

@@ -16,10 +16,14 @@ The pack is no part of the repository, and neither is SimH, which
 scripts/tools.sh fetches and builds. The pack on the card is written to by a
 talk that writes, and is after it what the copy is that SimH has written to.
 
-Usage: scripts/talk.py [-simh PDP11] [-pack FILE] [-port PORT] [-o DIR] [BINARY]
+Usage: scripts/talk.py [-talk NAME] [-simh PDP11] [-pack FILE] [-port PORT] [-o DIR] [BINARY]
 
+	-talk NAME   which talk of rk11/host_test.go to hold: rt11 (the default)
+	             or v6, whose pack is guest/UNIX0.DSK
 	-simh PDP11  the SimH binary (default $SIMH, or tools/simh/BIN/pdp11)
-	-pack FILE   the pack SimH begins with (default guest/RK0.DSK)
+	-pack FILE   the pack SimH begins with (default guest/RK0.DSK, or for
+	             the talk with V6 guest/UNIX0.DSK); the board begins with
+	             the RK0.DSK on its card, which scripts/card.py puts there
 	-port PORT   where the board is (default /dev/ttyUSB0)
 	-o DIR       where to leave what the two have said, board.txt and
 	             simh.txt, and the pack as SimH has left it, simh.dsk
@@ -40,15 +44,16 @@ import time
 
 PACK = 4872 * 512
 PATIENCE = 150  # seconds, for all of the talk
+PAUSE = 0.25  # seconds between what is waited for and what is typed, as a person leaves
 
 
-def talk(source):
-    """Answer the lines of the talk in the Go source: what is waited for,
-    and what is typed."""
+def talk(source, name):
+    """Answer the lines of the talk of that name in the Go source: what is
+    waited for, and what is typed."""
     text = open(source).read()
-    m = re.search(r'^var rt11 = \[\]line\{\n(.*?)^\}', text, re.M | re.S)
+    m = re.search(r'^var %s = \[\]line\{\n(.*?)^\}' % name, text, re.M | re.S)
     if not m:
-        sys.exit('talk.py: %s: no talk there' % source)
+        sys.exit('talk.py: %s: no talk %s there' % (source, name))
     string = r'"(?:[^"\\]|\\.)*"'
     lines = re.findall(r'\{(%s), (%s)\}' % (string, string), m.group(1))
     return [(ast.literal_eval(cue), ast.literal_eval(typed)) for cue, typed in lines]
@@ -64,7 +69,7 @@ def simh(binary, pack, lines, tmp):
     image = os.path.join(tmp, 'rk0.dsk')
     shutil.copy(pack, image)
     os.chmod(image, 0o600)
-    ini = ['set cpu 11/40', 'set cpu 56K']
+    ini = ['set cpu 11/40', 'set cpu 256K']  # 248 KB, all an 11/40 can have
     for dev in 'rha ptr ptp lpt dz rl hk rx rp rq tm tq rom'.split():
         ini.append('set %s disabled' % dev)
     for n in range(1, 8):
@@ -121,6 +126,9 @@ def board(binary, port, lines):
                     # What gives a slow terminal time is left out, as SimH
                     # leaves it out.
                     said += bytes(c & 0x7f for c in b).replace(b'\0', b'')
+            # Not at once: a program that has just prompted may still be
+            # setting up its terminal, and what comes before that is flushed.
+            time.sleep(PAUSE)
             p.stdin.write(typed.encode())
             p.stdin.flush()
     finally:
@@ -138,7 +146,8 @@ def board(binary, port, lines):
 def main():
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument('-simh', default=os.environ.get('SIMH', 'tools/simh/BIN/pdp11'))
-    p.add_argument('-pack', default='guest/RK0.DSK')
+    p.add_argument('-talk', default='rt11')
+    p.add_argument('-pack')
     p.add_argument('-port', default='/dev/ttyUSB0')
     p.add_argument('-o')
     p.add_argument('-h', '--help', action='store_true')
@@ -148,7 +157,9 @@ def main():
         print(__doc__)
         return
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    lines = talk(os.path.join(root, 'rk11', 'host_test.go'))
+    lines = talk(os.path.join(root, 'rk11', 'host_test.go'), args.talk)
+    if args.pack is None:
+        args.pack = 'guest/UNIX0.DSK' if args.talk == 'v6' else 'guest/RK0.DSK'
     if not os.path.exists(args.pack) or os.path.getsize(args.pack) != PACK:
         sys.exit('talk.py: %s is no pack of %d bytes' % (args.pack, PACK))
     with tempfile.TemporaryDirectory() as tmp:
@@ -157,10 +168,13 @@ def main():
     all_of_it = board(args.binary, args.port, lines)
     took = time.time() - began
 
-    # What the program says before the machine begins is not the machine's.
+    # What the program says before the machine begins is not the machine's:
+    # the board's transcript is taken from where what SimH said first begins
+    # in it, which is what came before the first cue, or the cue itself when
+    # nothing did.
     first = lines[0][0].encode()
     begin = there[:there.find(first)] if first in there else there
-    i = all_of_it.find(begin[:16])
+    i = all_of_it.find(begin[:16] if begin else first)
     here = all_of_it[i:] if i >= 0 else all_of_it
     if args.o:
         os.makedirs(args.o, exist_ok=True)
