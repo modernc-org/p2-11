@@ -59,10 +59,13 @@ func receive() {
 	}
 }
 
-// transmit puts what the console sends on the serial line.
+// transmit puts what the console sends on the serial line, seven bits of it,
+// as SimH's console does: Unix V6 sends a character with its even parity in
+// the eighth bit, which a terminal of today takes for another character, and
+// then a carriage return is not one.
 func transmit() {
 	for {
-		p2.WriteByte(console.Next())
+		p2.WriteByte(console.Next() & 0x7f)
 		console.Sent()
 	}
 }

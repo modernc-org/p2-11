@@ -124,8 +124,9 @@ def board(binary, port, lines):
                         print('talk.py: the loader has come to an end')
                         return said
                     # What gives a slow terminal time is left out, as SimH
-                    # leaves it out.
-                    said += bytes(c & 0x7f for c in b).replace(b'\0', b'')
+                    # leaves it out. The rest is compared as it came, the
+                    # eighth bit with it: a terminal shows what it is sent.
+                    said += b.replace(b'\0', b'')
             # Not at once: a program that has just prompted may still be
             # setting up its terminal, and what comes before that is flushed.
             time.sleep(PAUSE)
