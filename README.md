@@ -62,8 +62,7 @@ hello, world
 
 The `@` is the bootstrap of Unix asking for a file to load and start:
 `rkunix.40` is the kernel built for the 11/40, while `rkunix` and `unix` are
-the 11/45's and halt it. `root` logs in with no password. Only the root pack is
-used, so what V6 keeps on its other packs, the manual among it, is not there.
+the 11/45's and halt it. `root` logs in with no password.
 
 | | |
 | --- | --- |
@@ -178,6 +177,18 @@ Then the terminal is left, Ctrl-], and nothing else is typed first: until the
 board is reset the system keeps the old free list, and the next file written
 puts it back. After that `icheck /dev/rk0` finds nothing wrong, and `cc`
 compiles.
+
+The other three packs need no mending. Made whole and copied to the card as
+`RK1.DSK`, `RK2.DSK` and `RK3.DSK`, they are mounted when the system starts, as
+`/usr`, `/usr/source` and `/mnt`; without them `/usr` is empty. The manual is
+then in `/mnt/man`. There is no `man` command, but this prints a page:
+
+```
+# nroff /mnt/man/man0/naa /mnt/man/man1/ls.1 | tr -d '\010_'
+```
+
+`nroff` underlines a word by backspacing over it and typing underscores, which
+a terminal of today shows as the underscores alone; the `tr` takes them out.
 
 ## License
 
