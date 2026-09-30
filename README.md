@@ -77,8 +77,8 @@ the 11/45's and halt it. `root` logs in with no password.
 | KT11-D memory management, 248 KB | there |
 
 The processor is tested against the PDP-11/40 of
-[SimH](https://opensimh.org): 2865 cases of a machine before an instruction and
-after it, 485 of them the memory management's, on the board and on the machine
+[SimH](https://opensimh.org): 2902 cases of a machine before an instruction and
+after it, 522 of them the memory management's, on the board and on the machine
 the program is written on. A sweep of 15,685 more agrees as well. The disk is tested against SimH's too, with a
 program of 35 steps, [mac/disk.mac](mac/disk.mac). And so is all of it: a talk
 with RT-11 in which a file is copied, compared and deleted says on the board
