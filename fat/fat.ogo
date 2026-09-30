@@ -62,6 +62,7 @@ const (
 	tableSize16      = 22 // and neither this
 	volumeSize       = 32
 	tableSize        = 36
+	tableFlags       = 40 // whether the tables are mirrors, and which counts if not
 	rootCluster      = 44
 
 	// Where things are in an entry of a directory.
@@ -142,6 +143,15 @@ func (v *Volume) Mount(d Disk) error {
 	v.table = first + v.word(reservedBlocks)
 	size := v.long(tableSize)
 	v.data = v.table + uint32(v.buf[tables])*size
+	// The tables are mirrors of each other unless bit 7 of the flags says
+	// they are not, and then the one the lower four bits name is the one
+	// that says where a file is.
+	if flags := v.word(tableFlags); flags&0x80 != 0 {
+		if flags&0xf >= uint32(v.buf[tables]) {
+			return &ErrDamaged
+		}
+		v.table += (flags & 0xf) * size
+	}
 	v.root = v.long(rootCluster)
 	all := v.long(volumeSize)
 	if v.perCluster == 0 || size == 0 || first+all <= v.data {

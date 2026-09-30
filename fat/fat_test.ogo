@@ -28,6 +28,11 @@ type image struct {
 	empty bool // there is nothing on the disk
 	fails bool // and nothing can be read
 
+	// The tables are no mirrors of each other, and the one that counts is
+	// active; the other says what was so before, which before says.
+	unmirrored bool
+	active     byte
+
 	reads int
 }
 
@@ -81,6 +86,21 @@ func follows(cluster uint32) uint32 {
 		return 13
 	}
 	return 0
+}
+
+// before is what a table that does not count says of a cluster: what was so
+// before ONE.DSK grew by two clusters, and before PIECES.DSK was put in
+// pieces, when it was in one.
+func before(cluster uint32) uint32 {
+	switch cluster {
+	case 3:
+		return 0x0fffffff
+	case 7:
+		return 8
+	case 8:
+		return 0x0fffffff
+	}
+	return follows(cluster)
 }
 
 // put writes v at i of p, in as many bytes as size says.
@@ -144,12 +164,20 @@ func (d *image) Read(block uint32, p []byte) error {
 		put(p, volumeSize, 4, volumeLen)
 		put(p, tableSize, 4, tableLen)
 		put(p, rootCluster, 4, rootAt)
+		if d.unmirrored {
+			put(p, tableFlags, 2, 0x80|uint32(d.active))
+		}
 		put(p, signature, 2, 0xaa55)
 	case block >= tableAt && block < dataAt:
 		cluster := (block - tableAt) % tableLen * perBlock
+		stale := d.unmirrored && (block-tableAt)/tableLen != uint32(d.active)
 		for i := 0; i < BlockSize; i += 4 {
+			next := follows(cluster)
+			if stale {
+				next = before(cluster)
+			}
 			// The upper four bits are not the table's, and are set here.
-			put(p, i, 4, follows(cluster)|0xf0000000)
+			put(p, i, 4, next|0xf0000000)
 			cluster++
 		}
 	case block >= dataAt:
@@ -254,6 +282,32 @@ func TestFind(t *testing.T) {
 		find(t, v, "ONE.DSKS", &ErrNotFound, 0, 0)
 		find(t, v, "ONE DSK", &ErrNotFound, 0, 0)
 		find(t, v, "LONGER-BY-FAR.DSK", &ErrNotFound, 0, 0)
+	}
+}
+
+// Tables that are no mirrors of each other: the one the volume names counts,
+// and the other says what is no longer so, which would make a file in one
+// piece one in pieces, and one in pieces one in one piece, where another
+// file may be.
+func TestActiveTable(t *testing.T) {
+	for active := byte(0); active < 2; active++ {
+		disk = image{unmirrored: true, active: active}
+		if err := volume.Mount(&disk); err != nil {
+			println(err.Error())
+			t.Fail()
+		}
+		if volume.table != tableAt+uint32(active)*tableLen || volume.data != dataAt {
+			println("table", active, "counts: the table at", volume.table, "and the clusters at", volume.data)
+			t.Fail()
+		}
+		find(t, &volume, "ONE.DSK", nil, dataAt+(3-2)*perCluster, 3*perCluster)
+		find(t, &volume, "PIECES.DSK", &ErrFragmented, 0, 0)
+	}
+
+	disk = image{unmirrored: true, active: 2}
+	if err := volume.Mount(&disk); err != &ErrDamaged {
+		println("a volume is mounted by a table it has not")
+		t.Fail()
 	}
 }
 
