@@ -14,11 +14,17 @@ has put things.
 An entry is removed when `ogo` no longer shows it and the emulator no longer
 works around it. What was found and is closed is at the end, by name.
 
-Of the three that are open, the first two are one: what the backend makes of
-the C it is given. A call is dear, and what is not inlined is called. The third
-is a statement the parser does not take.
+Of the two that are open, both are one: what the backend makes of the C it is
+given. A call is dear, and what is not inlined is called. `ogo` v0.46.0, of
+2026-09-29, changed both: it inlines a function of six statements at most
+itself, a branch or a check in it or not. The tables are of the compilers
+before it, as said above; what v0.46.0 makes of the same helpers is under each,
+as `../ogo`'s CHANGELOG measured it on a P2-EDGE at 160 MHz. The two stay open
+because the emulator is still written for what a call costs: with v0.46.0 it
+runs 0.1% faster than with `--no-inline`, in all three builds, its hot path
+having no small function left to inline.
 
-## 1. A function with a branch in it is called, and a call is dear
+## 1. A call is dear, and a function with a branch in it was called
 
 | The helper, called in a loop | Clocks a call, `--unchecked` |
 | --- | --- |
@@ -49,6 +55,9 @@ func (m *machine) aborted() bool {
 A call and its return cost what forty or fifty instructions do, an
 instruction being two clocks.
 
+With v0.46.0, `nz`, two tests and three returns, is inlined and takes 29
+clocks a call.
+
 A `switch` is a chain of comparisons in the order of its cases. One of sixteen
 cases, in a method called in a loop, costs 149 clocks on average and 179 for
 its fifteenth.
@@ -65,7 +74,7 @@ times as many, from the same instructions in the same order.
 **Meanwhile:** the emulator is written for what a call costs, and says so where
 it matters, at the head of `pdp11/exec.ogo` and of `pdp11/bus.ogo`.
 
-## 2. A runtime check is a call
+## 2. A runtime check was a call
 
 | In a loop | Clocks, checked | Clocks, `--unchecked` |
 | --- | --- | --- |
@@ -90,20 +99,12 @@ The check of the receiver for nil and the check of an index each call a helper
 that has a branch in it, which by 1 is not inlined; and a function that calls
 one is in turn too large to be inlined itself.
 
+With v0.46.0, checked, a method testing a field of its receiver takes 51 clocks
+a call where it took 211, a setter of an array's element 67 where 229, and two
+accessors of a word 102 where 395: the call was most of what a check cost.
+
 The emulator as it is now loses less to them, its checks being few a call:
 114,904 instructions a second checked and 131,113 unchecked.
-
-## 3. An `if` that begins with a call is a syntax error
-
-```go
-if two(); ok {
-```
-
-is refused, `two` being a function, with "expected [AssignOp '{' '=' ...]".
-Go takes any simple statement before the condition, a call among them. Met on
-2026-09-29 in a test that wanted a call's results discarded and a condition
-looked at after it, and written with names for the results instead; the
-tree's compiler of that day refuses it as well.
 
 ## Found here and closed
 
@@ -117,3 +118,4 @@ tree's compiler of that day refuses it as well.
 | `ogo fmt` took the indentation from what continues a line: in `return a < b &&` with `b < c` on the next line, `b < c` came back under the `return`, and so an operand on a line of its own and the second line of a condition. | bfde4df |
 | A program could not ask how fast its clock is, which is chosen where it is built, with `--clock`. `p2.ClockFreq()` says: 160000000 on the board as built, and 200000000 built with `--clock 200MHz`. The emulator counts the cycles of its line clock in microseconds as before, which is good to one and forgives a cycle that is late. | d5af0c8 |
 | An error could not be returned that came of a call given a local buffer, `if err := fill(buf[:]); err != nil { return 0, err }`: "cannot return local err, which holds a pointer into local buf", of a `fill` that returns the address of a variable of the package or nothing. | c888892 |
+| An `if` that began with a call, `if two(); ok {`, was refused with "expected [AssignOp '{' '=' ...]", where Go takes any simple statement before the condition. The test that met it named the call's results instead, which is Go as well and stays. | e76f833, in v0.45.0 |
