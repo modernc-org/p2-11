@@ -236,9 +236,10 @@ func (m *Machine) control(ir uint16) {
 		m.traps |= trapBPT
 	case 0o000004:
 		m.traps |= trapIOT
-	case 0o000005: // RESET
+	case 0o000005: // RESET, which turns the memory management off as well
 		if m.psw&currentMode == kernel {
 			m.resetDevices()
+			m.sr0 = 0
 			m.traps |= attention
 		}
 	default:

@@ -641,8 +641,9 @@ def managed(rnd, scale):
 
 
 def ends(rnd, scale):
-    """The cases of a page that goes past the end of the bus. They have
-    random choices of their own, which leaves the others as they were."""
+    """The cases of a page that goes past the end of the bus, and of RESET
+    with the unit on. They have random choices of their own, which leaves the
+    others as they were."""
     cases = []
 
     def add(c, steps=1):
@@ -690,6 +691,26 @@ def ends(rnd, scale):
             elif ir != NOP:  # its operand @#a, a source or a destination
                 c.operand(0o37, word(rnd), at=wrapped + DATA + 2 * rnd.randrange(0o400))
 
+    # RESET turns the unit off in the kernel's mode, and clears what it
+    # recorded of an abort, and in the user's it does nothing. The operand of
+    # the instruction after it is in page 1, which is elsewhere while the
+    # unit is on, with another word where its address says.
+    for _ in range(scale):
+        for sr0 in (0o000001, 0o100001, 0o040001, 0o020001):
+            for user in (False, True):
+                c = add(Case(rnd, 0o000005, user=user), steps=2)
+                c.manage()
+                c.io[SR0] = sr0
+                for mode in (KERNEL, USER):
+                    c.page(mode, 1, ELSEWHERE[0])
+                at = PAGE + 2 * rnd.randrange(0o4000)
+                c.mem[CODE + 2] = 0o013700  # MOV @#at,R0
+                c.mem[CODE + 4] = at
+                c.poke(at, word(rnd))
+                c.mem[at] = word(rnd)
+        c = add(Case(rnd, 0o000005))  # the unit on, maintenance, an abort recorded
+        c.manage()
+        c.io[SR0] = 0o100401
     return cases
 
 
