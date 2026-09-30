@@ -163,13 +163,15 @@ class Case:
 
     def phys(self, a, mode=None):
         """Where the address a of a mode's space is on the bus, if the page is
-        there at all; the case's own mode unless one is given."""
+        there at all; the case's own mode unless one is given. A page that
+        goes past the end of the bus goes on at its beginning, the carry out
+        of 18 bits being lost."""
         if not self.io.get(SR0, 0) & 1:
             return a
         par_at, pdr_at = page_registers(self.mode() if mode is None else mode, a >> 13)
         if self.register(pdr_at) & 6 == 0:
             return None
-        return (self.register(par_at) << 6) + (a & 0o17777)
+        return ((self.register(par_at) << 6) + (a & 0o17777)) & 0o777777
 
     def sp(self):
         return self.usp if self.user() else self.ksp
@@ -638,6 +640,59 @@ def managed(rnd, scale):
     return cases
 
 
+def ends(rnd, scale):
+    """The cases of a page that goes past the end of the bus. They have
+    random choices of their own, which leaves the others as they were."""
+    cases = []
+
+    def add(c, steps=1):
+        c.steps = steps
+        cases.append(c)
+        return c
+
+    # Page 1 of the processor's mode at 777700: its first 100 bytes are the
+    # top of the I/O page, the status word among them, and the rest is the
+    # beginning of memory. Operands read, written and written back, words
+    # and bytes, either side of the end; and instructions fetched from past
+    # it, with what follows them.
+    wrapped = PAGE + 0o100  # at 0 on the bus
+    reads = (0o013700, 0o113700, 0o011001, 0o111001)
+    writes = (0o005037, 0o105037, 0o012737, 0o112737, 0o010110, 0o110110)
+    modifies = (0o005237, 0o105237)
+    for _ in range(scale):
+        for ir in reads + writes + modifies:
+            for _ in range(2):
+                c = add(Case(rnd, ir, user=rnd.random() < 0.3))
+                c.manage()
+                c.page(c.mode(), 1, 0o7777)
+                size = 1 if ir & 0o100000 else 2
+                at = wrapped + DATA + 2 * rnd.randrange(0o400) + (rnd.randrange(2) if size == 1 else 0)
+                if ir in reads and rnd.random() < 0.3:
+                    at = PAGE + (0o77 if size == 1 else 0o76)  # the status word, before the end
+                src, dst = ir >> 6 & 0o77, ir & 0o77
+                if ir >> 12 & 7:  # two operands, one of them a register or the word after
+                    if src >> 3 == 0 or src == 0o27:
+                        c.operand(src, value(rnd, size), size)
+                        c.operand(dst, value(rnd, size), size, at=at)
+                    else:
+                        c.operand(dst, value(rnd, size), size)
+                        c.operand(src, value(rnd, size), size, at=at)
+                else:
+                    c.operand(dst, value(rnd, size), size, at=at)
+        for ir in (NOP, 0o012700, 0o013700, 0o005037):
+            c = add(Case(rnd, ir, user=rnd.random() < 0.3), steps=rnd.choice((1, 2)))
+            c.manage()
+            c.page(c.mode(), 1, 0o7777)
+            c.pc = wrapped + CODE  # which is where the instruction is on the bus
+            c.next = c.pc + 2
+            if ir == 0o012700:
+                c.operand(0o27, word(rnd))
+            elif ir != NOP:  # its operand @#a, a source or a destination
+                c.operand(0o37, word(rnd), at=wrapped + DATA + 2 * rnd.randrange(0o400))
+
+    return cases
+
+
 def scattered(rnd, n):
     """Cases that are whatever sixteen bits come up."""
     cases = []
@@ -835,6 +890,7 @@ def main():
     for c in cases:
         if not c.io and rnd.random() < 0.125:
             c.manage()
+    cases += ends(random.Random('ends %d' % args.seed), args.scale)
     version = run(args.simh, cases)
     kept = [c for c in cases if usable(c)]
     new = args.o + '.new.ogo'

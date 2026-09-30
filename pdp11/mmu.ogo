@@ -59,8 +59,11 @@ const (
 	// A page is 8 KB, the offset into it these bits of the address.
 	pageOffset = 0o017777
 
-	// ioBase is where the I/O page is on the bus, 8 KB below its 18-bit end.
+	// ioBase is where the I/O page is on the bus, 8 KB below its 18-bit end,
+	// which is busEnd. A page that goes past the end goes on at 0, the carry
+	// out of 18 bits being lost.
 	ioBase = 0o760000
+	busEnd = 0o1000000
 
 	// What a page admits, which are the cycles of the bus: dati reads, dato
 	// writes, and datip reads what will be written back, for which the page

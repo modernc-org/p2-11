@@ -40,7 +40,10 @@ func (m *Machine) read(a, size, cycle uint16) uint16 {
 		}
 		pa = p.base + uint32(d)
 		if pa >= ioBase {
-			return m.readIO(uint16(pa-ioBase)+IOPage, size)
+			if pa < busEnd {
+				return m.readIO(uint16(pa-ioBase)+IOPage, size)
+			}
+			pa -= busEnd
 		}
 	}
 	i := pa >> 1
@@ -83,8 +86,11 @@ func (m *Machine) write(a, size, v uint16) {
 		}
 		pa = p.base + uint32(d)
 		if pa >= ioBase {
-			m.writeIO(uint16(pa-ioBase)+IOPage, size, v)
-			return
+			if pa < busEnd {
+				m.writeIO(uint16(pa-ioBase)+IOPage, size, v)
+				return
+			}
+			pa -= busEnd
 		}
 	}
 	i := pa >> 1
