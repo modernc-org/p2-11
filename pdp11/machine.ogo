@@ -254,7 +254,7 @@ func (m *Machine) SetPSW(v uint16) {
 // It reports false for an odd address and for one nothing answers at.
 func (m *Machine) Examine(a uint16) (uint16, bool) {
 	if a < IOPage {
-		if i := a >> 1; a&1 == 0 && i < uint16(len(m.mem)) {
+		if i := uint32(a >> 1); a&1 == 0 && i < uint32(len(m.mem)) {
 			return m.mem[i], true
 		}
 		return 0, false
@@ -271,7 +271,7 @@ func (m *Machine) Examine(a uint16) (uint16, bool) {
 // false where Examine would.
 func (m *Machine) Deposit(a, v uint16) bool {
 	if a < IOPage {
-		if i := a >> 1; a&1 == 0 && i < uint16(len(m.mem)) {
+		if i := uint32(a >> 1); a&1 == 0 && i < uint32(len(m.mem)) {
 			m.mem[i] = v
 			return true
 		}
