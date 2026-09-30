@@ -63,6 +63,7 @@ scripts/twin.sh -run Vectors ./pdp11
 scripts/twin.sh -v -run RT11 ./rk11 # the talk with RT-11, if guest/RK0.DSK and SimH are there
 scripts/talk.py                    # the same talk on the board and in SimH, half a minute
 scripts/talk.py -talk v6           # the talk with Unix V6, its pack being on the card, a minute and a half
+scripts/record.py                  # a session with V6 on the board, as v6-demo.cast for the README's GIF, two minutes
 scripts/card.py put guest/RK0.DSK RK0.DSK   # the pack onto the card through the board, two minutes
 scripts/card.py put guest/UNIX0.DSK RK0.DSK # the root pack of Unix V6 there instead
 scripts/card.py sum RK0.DSK guest/RK0.DSK   # which blocks of the pack on the card differ from the file, 15 s
@@ -95,8 +96,9 @@ Bytes written into that pipe before the `\x1d` reach the program as console inpu
 | `mac/demo.ogo`, and so on for every `.mac` | `scripts/mac.py mac/demo.mac` | the MACRO-11 source beside it |
 | `mac/disk_table.ogo` | `scripts/rk.py` | SimH running `mac/disk.mac` with two packs the script makes, a second |
 | `logo.svg` | `scripts/logo.py` | nothing: the name drawn as strokes, its ones the toggle switches of a front panel |
+| `v6-demo.gif` | `scripts/record.py`, and then `agg --idle-time-limit 120 --last-frame-duration 5 v6-demo.cast v6-demo.gif` | a session with Unix V6 on the board, its root pack on the card, two minutes |
 
-`scripts/tools.sh` fetches and builds SimH and the macro11 assembler into `tools/`, which git ignores, each at the revision the repository's files were made with. Nothing needs them but these three scripts. Made again with the same tools and arguments, the files come out as they are.
+`scripts/tools.sh` fetches and builds SimH and the macro11 assembler into `tools/`, which git ignores, each at the revision the repository's files were made with. Nothing needs them but these three scripts. Made again with the same tools and arguments, the files come out as they are. The recording is the exception: made again, it has the timing of its own session; and agg, asciinema's converter, is not among the tools, nor asciinema, which plays the `.cast`.
 
 ## The board
 
