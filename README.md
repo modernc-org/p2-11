@@ -64,6 +64,12 @@ The `@` is the bootstrap of Unix asking for a file to load and start:
 `rkunix.40` is the kernel built for the 11/40, while `rkunix` and `unix` are
 the 11/45's and halt it. `root` logs in with no password.
 
+![Unix V6 booting on the board and compiling hello, world, at real speed](v6-demo.gif)
+
+That is the board, recorded at real speed: 95 seconds from `ogo run` to the
+last `sync`, the first twelve of them the build, the load and the emulator
+timing itself. [scripts/record.py](scripts/record.py) makes the recording.
+
 | | |
 | --- | --- |
 | KD11-A processor with the KE11-E extended instruction set | there |
