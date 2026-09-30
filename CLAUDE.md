@@ -96,9 +96,9 @@ Bytes written into that pipe before the `\x1d` reach the program as console inpu
 | `mac/demo.ogo`, and so on for every `.mac` | `scripts/mac.py mac/demo.mac` | the MACRO-11 source beside it |
 | `mac/disk_table.ogo` | `scripts/rk.py` | SimH running `mac/disk.mac` with two packs the script makes, a second |
 | `logo.svg` | `scripts/logo.py` | nothing: the name drawn as strokes, its ones the toggle switches of a front panel |
-| `v6-demo.gif` | `scripts/record.py`, and then `agg --idle-time-limit 120 --last-frame-duration 5 v6-demo.cast v6-demo.gif` | a session with Unix V6 on the board, its root pack on the card, two minutes |
+| `v6-demo.gif` | `scripts/record.py`, then `agg --idle-time-limit 120 --last-frame-duration 5 v6-demo.cast v6-demo.gif`, then `scripts/poster.py v6-demo.gif`, which puts the last frame first, held 3 s, since what does not play a GIF shows its first frame, and a session's first is an empty terminal | a session with Unix V6 on the board, its root pack on the card, two minutes |
 
-`scripts/tools.sh` fetches and builds SimH and the macro11 assembler into `tools/`, which git ignores, each at the revision the repository's files were made with. Nothing needs them but these three scripts. Made again with the same tools and arguments, the files come out as they are. The recording is the exception: made again, it has the timing of its own session; and agg, asciinema's converter, is not among the tools, nor asciinema, which plays the `.cast`.
+`scripts/tools.sh` fetches and builds SimH and the macro11 assembler into `tools/`, which git ignores, each at the revision the repository's files were made with. Nothing needs them but these three scripts. Made again with the same tools and arguments, the files come out as they are. The recording is the exception: made again, it has the timing of its own session; and agg, asciinema's converter, is not among the tools, nor asciinema, which plays the `.cast`. `scripts/poster.py` wants Pillow and numpy, and checks that every frame it writes is the frame it read: Pillow's `quantize` comes near a colour, not to it.
 
 ## The board
 
@@ -129,7 +129,7 @@ The work moved to another machine on 2026-09-28. What the repository does not ho
 | --- | --- |
 | `ogo` v0.44.0 or later | the user installs it from `../ogo`, or `go install modernc.org/ogo@v0.44.0` |
 | Go, for `ogo` and the twin, which is built for 386 | the system; go1.27.1 was what there was |
-| python3, gcc, make and git, for the scripts and what they build; `fuser`, of psmisc | the system |
+| python3, gcc, make and git, for the scripts and what they build; `fuser`, of psmisc; Pillow and numpy, for `scripts/poster.py` | the system |
 | `tools/`, SimH and the assembler | `scripts/tools.sh`, which fetches and builds them |
 | `guest/`, the kits of RT-11 and Unix V6, `RK0.DSK`, and `UNIX0.DSK` to `UNIX3.DSK` | the user carries it; the repository must not |
 | the port of the board | `/dev/ttyUSB0` where the project began, with the user in the group `dialout` |

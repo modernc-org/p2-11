@@ -17,9 +17,11 @@ of version 2, which asciinema plays:
 	asciinema play v6-demo.cast
 
 and from which agg, asciinema's converter, makes the GIF of the README, the
-waits being left as long as they were:
+waits being left as long as they were, and scripts/poster.py puts its last
+frame first, for what shows no more than the first:
 
 	agg --idle-time-limit 120 --last-frame-duration 5 v6-demo.cast v6-demo.gif
+	scripts/poster.py v6-demo.gif
 
 The root pack of Unix V6 is to be on the card as RK0.DSK, and the session
 leaves it as a talk does. A recording made again has the timing of its own
