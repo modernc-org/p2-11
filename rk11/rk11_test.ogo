@@ -277,6 +277,28 @@ func TestPackFails(t *testing.T) {
 	expect(t, "the word count", machineRead(wc), 0o177400)
 	expect(t, "the bus address", machineRead(ba), 0o21000)
 	expect(t, "the disk address", machineRead(da), 2)
+
+	// And so with the bus address not moving, the first block's last word
+	// being what is left at it, which is 1 on drive 1.
+	for _, f := range []uint16{read, write} {
+		packs[1].fails = true
+		packs[1].after = 1
+		ask(controlReset, 0, 0, 0)
+		machineWrite(0o20000, 0o1234)
+		machineWrite(da, 1<<13|1)
+		machineWrite(ba, 0o20000)
+		machineWrite(wc, 0o177000) // 512 words
+		machineWrite(cs, inhibit|f<<1|start)
+		expect(t, "the word count, the bus address not moving", machineRead(wc), 0o177400)
+		expect(t, "the bus address", machineRead(ba), 0o20000)
+		expect(t, "the disk address", machineRead(da), 1<<13|2)
+		if f == read {
+			expect(t, "the error", machineRead(er), checksum)
+			expect(t, "the word the first block left", machineRead(0o20000), 1)
+		} else {
+			expect(t, "the error", machineRead(er), driveError)
+		}
+	}
 }
 
 // A drive whose switch is at WRITE LOCK stays locked when it is reset.

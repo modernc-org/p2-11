@@ -510,7 +510,8 @@ func (c *Controller) work() {
 }
 
 // read moves blocks of the pack to memory. With the bus address not moving,
-// the last word of them is all that is left there.
+// the last word of a block is all it leaves there, and a block that was read
+// counts as read when one after it cannot be.
 func (c *Controller) read(o *order, number uint32) report {
 	var r report
 	block, memory := o.block, o.memory
@@ -522,13 +523,11 @@ func (c *Controller) read(o *order, number uint32) report {
 			return r
 		}
 		if o.control&inhibit != 0 {
-			if left == 0 {
-				r.words = o.words
-				if c.memory.Store(memory, c.block[2*n-2:2*n]) == 0 {
-					r.words = 0
-					r.errors |= noMemory
-				}
+			if c.memory.Store(memory, c.block[2*n-2:2*n]) == 0 {
+				r.errors |= noMemory
+				return r
 			}
+			r.words += n
 			continue
 		}
 		stored := uint32(c.memory.Store(memory, c.block[:2*n]))
