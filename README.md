@@ -95,6 +95,10 @@ P2-EC, and needs `ogo` v0.44.0 or a later one:
 go install modernc.org/ogo@v0.44.0
 ```
 
+Without Go, a binary of it for Linux, macOS or Windows is among
+[its releases](https://github.com/modernc-org/ogo/releases); v0.46.0 is the
+one this was last tested with.
+
 ```sh
 ogo run                                  # build, load, and open a terminal
 ogo build --unchecked --clock 200MHz     # as fast as it goes: 148,385 a second
