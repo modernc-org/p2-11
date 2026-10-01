@@ -1,0 +1,695 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package vt100 is the screen of a VT100 terminal: what the characters and the
+// sequences a host sends do to it, and what the terminal answers.
+//
+// It is written from chapter 3 of the VT100 User Guide, whose words the
+// comments use, and does what the guide says a VT100 with the advanced video
+// option does, in ANSI mode and in VT52 mode, but for what a screen of 80
+// columns shown by a program has no use for or no way to show:
+//
+//   - 132 columns: DECCOLM erases the screen, as the VT100 does when it changes
+//     the width, and the screen stays 80 columns wide;
+//   - lines of double width or height, which are shown single;
+//   - smooth scrolling, interlace, the LEDs, the bell, the self tests and the
+//     answerback message;
+//   - the keyboard, which is the program's. The modes that change what the keys
+//     send are kept for it: DECCKM, DECKPAM and DECKPNM, and LNM.
+//
+// A byte's eighth bit is dropped, as the VT100 drops a parity bit, and Unix V6
+// sends one.
+//
+// The terminal starts with autowrap on, as today's terminals do; the VT100
+// leaves that to its SET-UP. DECAWM turns it off.
+//
+// A Terminal is shared by two cogs, and no lock is needed between them because
+// every variable two cogs share is written by one of them only. The cog that
+// shows what the host sends calls Put and owns the screen and the head of the
+// ring of what the terminal answers. The cog that sends the host what the
+// terminal has to say calls Answer and owns the tail of that ring. What shows the
+// screen only reads it.
+//
+// Nothing here knows how the screen is shown. Its cells are laid out as the
+// tile driver of github.com/totalspectrum/p2_vga_text reads them.
+
+const (
+	// The size of the screen.
+	Cols = 80
+	Rows = 24
+
+	// The colours, as numbers of the ANSI palette.
+	black  = 0
+	white  = 7  // a character's
+	bright = 15 // a bold one's
+
+	// The effects of a cell.
+	underlined = 0x02 << 24 // a line under the character
+	blinking   = 0x80 << 24 // the character gives way to its background half the time
+	cursor     = 0x10 << 24 // the cell turns the character's colour half the time, unless it blinks
+
+	// The renditions a character is put in, of which SGR selects any.
+	bold       = 1 << 0
+	underscore = 1 << 1
+	blink      = 1 << 2
+	reverse    = 1 << 3
+
+	// The character sets SCS designates.
+	ascii    = 0
+	uk       = 1 // ASCII, but for the pound sign where # is
+	graphics = 2 // the special graphics, where 137 to 176 are
+
+	// Where a cell has the characters that are not shown as the host sends
+	// them: the special graphics in the order of their set, from 0, and the
+	// pound sign where Latin-1 has it.
+	pound        = 0xa3
+	checkerboard = 'a' - 0o137 // the error character
+
+	params     = 16 // the parameters of a sequence that count
+	answerSize = 64 // what the host is told and has not read, a power of two
+	longest    = 8  // the longest answer, the position of the last line and column
+)
+
+// What the parser is in the middle of.
+const (
+	ground     = iota // nothing
+	escape            // ESC
+	designate         // ESC ( or ESC ), and then the set
+	hash              // ESC #
+	sequence          // ESC [ and some of its parameters
+	skip              // a sequence the VT100 does not have, to its end
+	skipEscape        // an escape sequence the VT100 does not have, to its end
+	line              // ESC Y in VT52 mode, and then the line
+	column            // and then the column
+)
+
+// A Cell is a character on the screen, in four bytes: its colour, the colour of
+// its background, the character, and its effects. The colours are numbers of
+// the ANSI palette of 256.
+//
+// The character is what the host sent, but for the special graphics, which are
+// 0 to 31 in the order of their set, and the pound sign of the United Kingdom
+// set, which is 243 octal, as in Latin-1. A font is to have them there.
+//
+// The effects are those of the tile driver of p2_vga_text in its mode of four
+// bytes a character. The cell the cursor is in has an effect of its own, which
+// moves with the cursor.
+type Cell uint32
+
+// A savedCursor is what DECSC saves: the cursor position, the graphic
+// rendition, and the character sets.
+type savedCursor struct {
+	row, col  int
+	rendition byte
+	sets      [2]byte
+	shift     int
+}
+
+// A Terminal is a VT100's screen and what it has to say to the host. The zero
+// Terminal is not ready; Reset brings it to the state it powers up in.
+type Terminal struct {
+	// Screen is what the terminal shows, a row after another from the top.
+	Screen [Rows * Cols]Cell
+
+	row, col int  // the cursor
+	last     bool // a character was put in the last column with autowrap on: the next goes to the next line
+	marked   int  // the cell that shows the cursor
+
+	top, bottom int // the margins of the scrolling region, lines of the screen
+
+	tabs [Cols]bool
+
+	rendition byte
+	look      Cell    // the colours and effects of the rendition
+	sets      [2]byte // G0 and G1
+	shift     int     // which of them is in use: SI selects G0, SO G1
+	saved     savedCursor
+
+	ansi       bool // DECANM: ANSI mode; VT52 mode if not
+	autowrap   bool // DECAWM
+	origin     bool // DECOM: line numbers count from the top margin
+	newline    bool // LNM: a line feed is a new line
+	inverse    bool // DECSCNM: dark characters on a light screen
+	cursorKeys bool // DECCKM
+	keypad     bool // DECKPAM
+
+	state   int
+	param   [params]int
+	n       int  // which parameter the digits go to, params for none
+	private bool // the sequence began with a question mark
+	which   int  // which set ESC ( or ESC ) designates
+	at      int  // the line of ESC Y
+
+	answers [answerSize]byte
+	head    uint32 // bytes queued, written by the cog that calls Put only
+	tail    uint32 // bytes answered, written by the cog that calls Answer only
+}
+
+// Reset brings the terminal to the state it powers up in, which is also what
+// RIS does: the screen blank, the cursor home, and every mode as SET-UP leaves
+// it. What the terminal was to answer and has not is left to be read.
+func (t *Terminal) Reset() {
+	t.ansi = true
+	t.autowrap = true
+	t.origin = false
+	t.newline = false
+	t.inverse = false
+	t.cursorKeys = false
+	t.keypad = false
+	t.top, t.bottom = 0, Rows-1
+	for i := 0; i < Cols; i++ {
+		t.tabs[i] = i%8 == 0 && i != 0
+	}
+	t.rendition = 0
+	t.look = t.style(0)
+	t.sets[0], t.sets[1] = ascii, ascii
+	t.shift = 0
+	t.saved = savedCursor{}
+	t.state = ground
+	t.erase(0, Rows*Cols)
+	t.row, t.col, t.last = 0, 0, false
+	t.marked = 0
+	t.Screen[0] |= cursor
+}
+
+// Put hands the terminal a byte the host sent. It is what the cog that shows
+// the host's bytes calls, and that cog only.
+func (t *Terminal) Put(b byte) {
+	t.Screen[t.marked] &^= cursor
+	t.put(b & 0x7f)
+	t.marked = t.row*Cols + t.col
+	t.Screen[t.marked] |= cursor
+}
+
+// Answer answers the next byte the terminal has to say to the host, and false
+// when there is none. It is what the cog that sends the host the keyboard's
+// bytes calls, and that cog only.
+func (t *Terminal) Answer() (byte, bool) {
+	if t.tail == t.head {
+		return 0, false
+	}
+	b := t.answers[t.tail&(answerSize-1)]
+	t.tail++
+	return b, true
+}
+
+// put does what a byte of seven bits does. A control character does its work
+// wherever it comes, in the middle of a sequence too, which then goes on.
+func (t *Terminal) put(b byte) {
+	if b < ' ' || b == 0o177 {
+		t.control(b)
+		return
+	}
+	switch t.state {
+	case ground:
+		t.show(t.glyph(b))
+	case escape:
+		if t.ansi {
+			t.escape(b)
+		} else {
+			t.vt52(b)
+		}
+	case designate:
+		switch b {
+		case 'A':
+			t.sets[t.which] = uk
+		case 'B', '1': // ASCII, and the alternate character ROM's standard set
+			t.sets[t.which] = ascii
+		case '0', '2': // the special graphics, and the alternate ROM's
+			t.sets[t.which] = graphics
+		}
+		t.state = ground
+	case hash:
+		if b == '8' { // DECALN
+			c := t.style(0) | 'E'<<16
+			for i := 0; i < Rows*Cols; i++ {
+				t.Screen[i] = c
+			}
+		}
+		t.state = ground
+	case sequence:
+		t.sequence(b)
+	case skip:
+		if b >= 0o100 {
+			t.state = ground
+		}
+	case skipEscape:
+		if b >= 0o60 {
+			t.state = ground
+		}
+	case line:
+		t.at = int(b) - 0o40
+		t.state = column
+	case column:
+		t.goTo(t.at, int(b)-0o40)
+		t.state = ground
+	}
+}
+
+// control does what a control character does.
+func (t *Terminal) control(b byte) {
+	switch b {
+	case 0o10: // BS
+		t.col = max(t.col-1, 0)
+		t.last = false
+	case 0o11: // HT
+		t.tab()
+	case 0o12, 0o13, 0o14: // LF, VT, FF
+		t.index()
+		if t.newline {
+			t.col = 0
+		}
+	case 0o15: // CR
+		t.col = 0
+		t.last = false
+	case 0o16: // SO
+		t.shift = 1
+	case 0o17: // SI
+		t.shift = 0
+	case 0o30, 0o32: // CAN, SUB
+		if t.state != ground {
+			t.state = ground
+			t.show(checkerboard)
+		}
+	case 0o33: // ESC
+		t.state = escape
+	}
+}
+
+// escape does what the character after ESC does in ANSI mode.
+func (t *Terminal) escape(b byte) {
+	t.state = ground
+	switch b {
+	case '[':
+		clear(t.param[:])
+		t.n = 0
+		t.private = false
+		t.state = sequence
+	case '(', ')':
+		t.which = int(b - '(')
+		t.state = designate
+	case '#':
+		t.state = hash
+	case 'D': // IND
+		t.index()
+	case 'E': // NEL
+		t.index()
+		t.col = 0
+	case 'M': // RI
+		t.reverseIndex()
+	case '7': // DECSC
+		t.saved = savedCursor{t.row, t.col, t.rendition, t.sets, t.shift}
+	case '8': // DECRC
+		t.row, t.col = t.saved.row, t.saved.col
+		t.last = false
+		t.rendition = t.saved.rendition
+		t.look = t.style(t.rendition)
+		t.sets = t.saved.sets
+		t.shift = t.saved.shift
+	case 'H': // HTS
+		t.tabs[t.col] = true
+	case 'c': // RIS
+		t.Reset()
+	case 'Z': // DECID, which is answered as DA is
+		t.say("\033[?1;2c")
+	case '=': // DECKPAM
+		t.keypad = true
+	case '>': // DECKPNM
+		t.keypad = false
+	default:
+		if b < 0o60 {
+			t.state = skipEscape
+		}
+	}
+}
+
+// vt52 does what the character after ESC does in VT52 mode.
+func (t *Terminal) vt52(b byte) {
+	t.state = ground
+	switch b {
+	case 'A':
+		t.up(1)
+	case 'B':
+		t.down(1)
+	case 'C':
+		t.col = min(t.col+1, Cols-1)
+		t.last = false
+	case 'D':
+		t.col = max(t.col-1, 0)
+		t.last = false
+	case 'F':
+		t.sets[t.shift] = graphics
+	case 'G':
+		t.sets[t.shift] = ascii
+	case 'H':
+		t.goTo(0, 0)
+	case 'I':
+		t.reverseIndex()
+	case 'J':
+		t.erase(t.row*Cols+t.col, Rows*Cols)
+	case 'K':
+		t.erase(t.row*Cols+t.col, (t.row+1)*Cols)
+	case 'Y':
+		t.state = line
+	case 'Z':
+		t.say("\033/Z")
+	case '=':
+		t.keypad = true
+	case '>':
+		t.keypad = false
+	case '<':
+		t.ansi = true
+	}
+}
+
+// sequence reads a control sequence, ESC [ and what follows, and does it when
+// its final character comes.
+func (t *Terminal) sequence(b byte) {
+	switch {
+	case b >= '0' && b <= '9':
+		if t.n < params {
+			t.param[t.n] = min(t.param[t.n]*10+int(b-'0'), 9999)
+		}
+		return
+	case b == ';':
+		t.n = min(t.n+1, params)
+		return
+	case b == '?' && t.n == 0 && t.param[0] == 0 && !t.private:
+		t.private = true
+		return
+	case b < 0o100: // an intermediate character, or a parameter the VT100 does not have
+		t.state = skip
+		return
+	}
+
+	t.state = ground
+	if t.private {
+		switch b {
+		case 'h':
+			t.modes(true)
+		case 'l':
+			t.modes(false)
+		}
+		return
+	}
+
+	switch b {
+	case 'A': // CUU
+		t.up(t.arg(0, 1))
+	case 'B': // CUD
+		t.down(t.arg(0, 1))
+	case 'C': // CUF
+		t.col = min(t.col+t.arg(0, 1), Cols-1)
+		t.last = false
+	case 'D': // CUB
+		t.col = max(t.col-t.arg(0, 1), 0)
+		t.last = false
+	case 'H', 'f': // CUP, HVP
+		t.goTo(t.arg(0, 1)-1, t.arg(1, 1)-1)
+	case 'J': // ED
+		switch t.arg(0, 0) {
+		case 0:
+			t.erase(t.row*Cols+t.col, Rows*Cols)
+		case 1:
+			t.erase(0, t.row*Cols+t.col+1)
+		case 2:
+			t.erase(0, Rows*Cols)
+		}
+	case 'K': // EL
+		switch t.arg(0, 0) {
+		case 0:
+			t.erase(t.row*Cols+t.col, (t.row+1)*Cols)
+		case 1:
+			t.erase(t.row*Cols, t.row*Cols+t.col+1)
+		case 2:
+			t.erase(t.row*Cols, (t.row+1)*Cols)
+		}
+	case 'm': // SGR
+		for i := 0; i <= t.n && i < params; i++ {
+			switch t.param[i] {
+			case 0:
+				t.rendition = 0
+			case 1:
+				t.rendition |= bold
+			case 4:
+				t.rendition |= underscore
+			case 5:
+				t.rendition |= blink
+			case 7:
+				t.rendition |= reverse
+			}
+		}
+		t.look = t.style(t.rendition)
+	case 'r': // DECSTBM
+		top, bottom := t.arg(0, 1), t.arg(1, Rows)
+		if top < bottom && bottom <= Rows {
+			t.top, t.bottom = top-1, bottom-1
+			t.goTo(0, 0)
+		}
+	case 'g': // TBC
+		switch t.arg(0, 0) {
+		case 0:
+			t.tabs[t.col] = false
+		case 3:
+			clear(t.tabs[:])
+		}
+	case 'h': // SM
+		t.modes(true)
+	case 'l': // RM
+		t.modes(false)
+	case 'c': // DA
+		if t.arg(0, 0) == 0 {
+			t.say("\033[?1;2c")
+		}
+	case 'n': // DSR
+		switch t.arg(0, 0) {
+		case 5:
+			t.say("\033[0n")
+		case 6: // CPR
+			if t.room() {
+				row := t.row
+				if t.origin {
+					row -= t.top
+				}
+				t.tell('\033')
+				t.tell('[')
+				t.number(row + 1)
+				t.tell(';')
+				t.number(t.col + 1)
+				t.tell('R')
+			}
+		}
+	}
+}
+
+// modes sets or resets the modes the parameters of SM or RM name.
+func (t *Terminal) modes(on bool) {
+	for i := 0; i <= t.n && i < params; i++ {
+		if !t.private {
+			if t.param[i] == 20 { // LNM
+				t.newline = on
+			}
+			continue
+		}
+		switch t.param[i] {
+		case 1: // DECCKM
+			t.cursorKeys = on
+		case 2: // DECANM, which only VT52 mode's ESC < sets
+			if !on {
+				t.ansi = false
+			}
+		case 3: // DECCOLM
+			t.erase(0, Rows*Cols)
+			t.top, t.bottom = 0, Rows-1
+			t.goTo(0, 0)
+		case 5: // DECSCNM
+			if on != t.inverse {
+				t.inverse = on
+				t.look = t.style(t.rendition)
+				for j := 0; j < Rows*Cols; j++ {
+					c := t.Screen[j]
+					t.Screen[j] = c&^0xffff | (c&0xff)<<8 | (c>>8)&0xff
+				}
+			}
+		case 6: // DECOM
+			t.origin = on
+			t.goTo(0, 0)
+		case 7: // DECAWM
+			t.autowrap = on
+		}
+	}
+}
+
+// arg answers the ith parameter of a sequence, or def if it was not given or
+// is 0.
+func (t *Terminal) arg(i, def int) int {
+	if i > t.n || i >= params || t.param[i] == 0 {
+		return def
+	}
+	return t.param[i]
+}
+
+// style answers the colours and effects of a character in a rendition.
+func (t *Terminal) style(rendition byte) Cell {
+	fg, bg := Cell(white), Cell(black)
+	if rendition&bold != 0 {
+		fg = bright
+	}
+	if (rendition&reverse != 0) != t.inverse {
+		fg, bg = bg, fg
+	}
+	c := fg | bg<<8
+	if rendition&underscore != 0 {
+		c |= underlined
+	}
+	if rendition&blink != 0 {
+		c |= blinking
+	}
+	return c
+}
+
+// glyph answers where a character the host sent is in a cell, in the character
+// set in use.
+func (t *Terminal) glyph(b byte) byte {
+	switch t.sets[t.shift] {
+	case uk:
+		if b == '#' {
+			return pound
+		}
+	case graphics:
+		if b >= 0o137 {
+			return b - 0o137
+		}
+	}
+	return b
+}
+
+// show puts a character at the cursor, and moves the cursor on unless it is at
+// the right margin. There, with autowrap on, the next character goes to the
+// next line.
+func (t *Terminal) show(c byte) {
+	if t.last {
+		t.col = 0
+		t.index()
+	}
+	t.Screen[t.row*Cols+t.col] = t.look | Cell(c)<<16
+	if t.col < Cols-1 {
+		t.col++
+	} else {
+		t.last = t.autowrap
+	}
+}
+
+// tab moves the cursor to the next tab stop, or to the right margin if there
+// is none.
+func (t *Terminal) tab() {
+	for t.col < Cols-1 {
+		t.col++
+		if t.tabs[t.col] {
+			break
+		}
+	}
+	t.last = false
+}
+
+// goTo moves the cursor to a line and a column counted from 0, the line from
+// the top margin in origin mode. A place off the screen, or outside the
+// margins in origin mode, is taken for the nearest one on it.
+func (t *Terminal) goTo(row, col int) {
+	top, bottom := 0, Rows-1
+	if t.origin {
+		top, bottom = t.top, t.bottom
+		row += t.top
+	}
+	t.row = min(max(row, top), bottom)
+	t.col = min(max(col, 0), Cols-1)
+	t.last = false
+}
+
+// up moves the cursor up n lines, to the top margin at most, or to the top
+// line if it is above that margin already.
+func (t *Terminal) up(n int) {
+	top := 0
+	if t.row >= t.top {
+		top = t.top
+	}
+	t.row = max(t.row-n, top)
+	t.last = false
+}
+
+// down moves the cursor down n lines, to the bottom margin at most, or to the
+// bottom line if it is below that margin already.
+func (t *Terminal) down(n int) {
+	bottom := Rows - 1
+	if t.row <= t.bottom {
+		bottom = t.bottom
+	}
+	t.row = min(t.row+n, bottom)
+	t.last = false
+}
+
+// index moves the cursor down a line, and at the bottom margin scrolls what
+// is between the margins up instead.
+func (t *Terminal) index() {
+	t.last = false
+	switch {
+	case t.row == t.bottom:
+		copy(t.Screen[t.top*Cols:t.bottom*Cols], t.Screen[(t.top+1)*Cols:(t.bottom+1)*Cols])
+		t.erase(t.bottom*Cols, (t.bottom+1)*Cols)
+	case t.row < Rows-1:
+		t.row++
+	}
+}
+
+// reverseIndex moves the cursor up a line, and at the top margin scrolls what
+// is between the margins down instead.
+func (t *Terminal) reverseIndex() {
+	t.last = false
+	switch {
+	case t.row == t.top:
+		copy(t.Screen[(t.top+1)*Cols:(t.bottom+1)*Cols], t.Screen[t.top*Cols:t.bottom*Cols])
+		t.erase(t.top*Cols, (t.top+1)*Cols)
+	case t.row > 0:
+		t.row--
+	}
+}
+
+// erase blanks the cells from i up to j. What is erased has no rendition.
+func (t *Terminal) erase(i, j int) {
+	c := t.style(0) | ' '<<16
+	for ; i < j; i++ {
+		t.Screen[i] = c
+	}
+}
+
+// say queues an answer for the host, unless what the host has not read leaves
+// no room for the longest answer there is. Then it is lost: a host that asks
+// faster than it reads has only itself to blame.
+func (t *Terminal) say(s string) {
+	if !t.room() {
+		return
+	}
+	for i := 0; i < len(s); i++ {
+		t.tell(s[i])
+	}
+}
+
+// room reports whether the longest answer there is fits in the ring.
+func (t *Terminal) room() bool {
+	return t.head-t.tail <= answerSize-longest
+}
+
+// number says a number, in decimal.
+func (t *Terminal) number(n int) {
+	if n >= 10 {
+		t.number(n / 10)
+	}
+	t.tell(byte('0' + n%10))
+}
+
+// tell queues a byte of an answer, for which there is room.
+func (t *Terminal) tell(b byte) {
+	t.answers[t.head&(answerSize-1)] = b
+	t.head++
+}

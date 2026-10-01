@@ -1,0 +1,568 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+import "testing"
+
+// What the host sends, and what the VT100 User Guide says the screen then
+// shows. Each test begins with a terminal just powered up.
+
+var term Terminal
+
+// begin powers the terminal up, and forgets what it had to answer.
+func begin() {
+	term.Reset()
+	for {
+		if _, ok := term.Answer(); !ok {
+			break
+		}
+	}
+}
+
+// send hands the terminal what the host sends.
+func send(s string) {
+	for i := 0; i < len(s); i++ {
+		term.Put(s[i])
+	}
+}
+
+// at answers the character in a cell.
+func at(row, col int) byte {
+	return byte(term.Screen[row*Cols+col] >> 16)
+}
+
+// expectRow fails the test unless a line of the screen shows want, and blanks
+// after it.
+func expectRow(t *testing.T, what string, row int, want string) {
+	for col := 0; col < Cols; col++ {
+		w := byte(' ')
+		if col < len(want) {
+			w = want[col]
+		}
+		if at(row, col) != w {
+			printf("%s: line %d is |", what, row)
+			for col := 0; col < Cols; col++ {
+				printf("%c", at(row, col))
+			}
+			printf("|, want |%s|\n", want)
+			t.Fail()
+			return
+		}
+	}
+}
+
+// expectRun fails the test unless the cells of a line from first to last show
+// c.
+func expectRun(t *testing.T, what string, row, first, last int, c byte) {
+	for col := first; col <= last; col++ {
+		if at(row, col) != c {
+			printf("%s: the cell at %d,%d has %q, want %q\n", what, row, col, at(row, col), c)
+			t.Fail()
+			return
+		}
+	}
+}
+
+// expectBlank fails the test unless the lines from first to last are blank.
+func expectBlank(t *testing.T, what string, first, last int) {
+	for row := first; row <= last; row++ {
+		expectRow(t, what, row, "")
+	}
+}
+
+// expectCursor fails the test unless the cursor is where want says, and that
+// cell is the only one that shows it.
+func expectCursor(t *testing.T, what string, row, col int) {
+	if term.row != row || term.col != col {
+		printf("%s: the cursor is at %d,%d, want %d,%d\n", what, term.row, term.col, row, col)
+		t.Fail()
+	}
+	n := 0
+	for i := 0; i < Rows*Cols; i++ {
+		if term.Screen[i]&cursor != 0 {
+			n++
+		}
+	}
+	if n != 1 || term.Screen[row*Cols+col]&cursor == 0 {
+		printf("%s: %d cells show the cursor, want the one at %d,%d\n", what, n, row, col)
+		t.Fail()
+	}
+}
+
+// expectCell fails the test unless a cell, but for the cursor, is want.
+func expectCell(t *testing.T, what string, row, col int, want Cell) {
+	if got := term.Screen[row*Cols+col] &^ cursor; got != want {
+		printf("%s: the cell at %d,%d is %08x, want %08x\n", what, row, col, got, want)
+		t.Fail()
+	}
+}
+
+// expectAnswer fails the test unless what the terminal has to say is want.
+func expectAnswer(t *testing.T, what string, want string) {
+	var got [answerSize]byte
+	n := 0
+	for n < len(got) {
+		b, ok := term.Answer()
+		if !ok {
+			break
+		}
+		got[n] = b
+		n++
+	}
+	ok := n == len(want)
+	for i := 0; ok && i < n; i++ {
+		ok = got[i] == want[i]
+	}
+	if !ok {
+		printf("%s: the terminal answers %q, want %q\n", what, got[:n], want)
+		t.Fail()
+	}
+}
+
+// The colours and effects of a character in no rendition, and in bold.
+const (
+	normal = white | black<<8
+	bolder = bright | black<<8
+)
+
+func TestPowerUp(t *testing.T) {
+	begin()
+	expectBlank(t, "powered up", 0, Rows-1)
+	expectCursor(t, "powered up", 0, 0)
+	expectCell(t, "a blank", 5, 5, normal|' '<<16)
+	send("Hello")
+	expectRow(t, "Hello", 0, "Hello")
+	expectCursor(t, "Hello", 0, 5)
+	expectCell(t, "its H", 0, 0, normal|'H'<<16)
+}
+
+func TestControls(t *testing.T) {
+	begin()
+	send("abc\rX")
+	expectRow(t, "CR: to the left margin", 0, "Xbc")
+	send("\nY")
+	expectRow(t, "LF: down a line, the column kept", 1, " Y")
+	send("\013Z\014W")
+	expectRow(t, "VT and FF: as LF", 2, "  Z")
+	expectRow(t, "VT and FF: as LF", 3, "   W")
+	send("\r\b\b1")
+	expectRow(t, "BS at the left margin: nothing", 3, "1  W")
+	send("\b\b2")
+	expectRow(t, "BS", 3, "2  W")
+	send("\000\177\0073")
+	expectRow(t, "NUL, DEL and BEL: nothing on the screen", 3, "23 W")
+	send("\r\n\xc1\xe2\x8d\x8a\xc3")
+	expectRow(t, "the eighth bit dropped", 4, "Ab")
+	expectRow(t, "the eighth bit dropped", 5, "C")
+	send("\x0e\x0f\x11\x13\x05")
+	expectCursor(t, "SO, SI, XON, XOFF and ENQ: nothing on the screen", 5, 1)
+}
+
+func TestTabs(t *testing.T) {
+	begin()
+	send("\ta\tb")
+	expectRow(t, "HT: stops every eight columns", 0, "        a       b")
+	send("\r\n\033[3g\t")
+	expectCursor(t, "TBC 3: no stops, so HT goes to the right margin", 1, Cols-1)
+	begin()
+	send("\033[3g\033[5C\033H\033[10C\033H\r\td\te\t")
+	expectRow(t, "HTS", 0, "     d         e")
+	expectCursor(t, "HTS: after the last stop, the right margin", 0, Cols-1)
+	begin()
+	send("\t\033[g\033[0g\r\tg")
+	expectRow(t, "TBC and TBC 0: the stop at the cursor", 0, "                g")
+}
+
+func TestAutowrap(t *testing.T) {
+	begin()
+	for i := 0; i < Cols; i++ {
+		send("x")
+	}
+	expectCursor(t, "a full line: the cursor at the right margin", 0, Cols-1)
+	send("y")
+	expectRun(t, "wrapped", 0, 0, Cols-1, 'x')
+	expectRow(t, "wrapped", 1, "y")
+	expectCursor(t, "wrapped", 1, 1)
+
+	begin()
+	send("\033[1;80Hx\b")
+	expectCursor(t, "BS after the last column: the column before it", 0, Cols-2)
+	send("z")
+	expectRun(t, "BS after the last column", 0, Cols-2, Cols-2, 'z')
+	expectRun(t, "BS after the last column", 0, Cols-1, Cols-1, 'x')
+	expectRow(t, "BS after the last column", 1, "")
+
+	begin()
+	send("\033[1;80Hx\ry")
+	expectCursor(t, "CR after the last column: no wrap", 0, 1)
+	expectRow(t, "CR after the last column: no wrap", 1, "")
+
+	begin()
+	send("\033[?7l\033[1;79Habcd")
+	expectCursor(t, "autowrap off", 0, Cols-1)
+	expectRun(t, "autowrap off", 0, Cols-2, Cols-2, 'a')
+	expectRun(t, "autowrap off", 0, Cols-1, Cols-1, 'd')
+	expectRow(t, "autowrap off", 1, "")
+
+	begin()
+	send("\033[24;80Hx")
+	send("y")
+	expectRun(t, "a wrap at the bottom scrolls", Rows-2, Cols-1, Cols-1, 'x')
+	expectRow(t, "a wrap at the bottom scrolls", Rows-1, "y")
+	expectCursor(t, "a wrap at the bottom scrolls", Rows-1, 1)
+}
+
+func TestCursorMoves(t *testing.T) {
+	begin()
+	send("\033[10;20H")
+	expectCursor(t, "CUP", 9, 19)
+	send("\033[H")
+	expectCursor(t, "CUP with no parameters: home", 0, 0)
+	send("\033[5;5f\033[;7H")
+	expectCursor(t, "a parameter left out: 1", 0, 6)
+	send("\033[0;0H")
+	expectCursor(t, "0: 1", 0, 0)
+	send("\033[99;99H")
+	expectCursor(t, "CUP off the screen: the nearest place on it", Rows-1, Cols-1)
+
+	send("\033[12;40H\033[A")
+	expectCursor(t, "CUU", 10, 39)
+	send("\033[3A\033[0A")
+	expectCursor(t, "CUU 3 and CUU 0", 6, 39)
+	send("\033[B\033[4B")
+	expectCursor(t, "CUD and CUD 4", 11, 39)
+	send("\033[C\033[10C")
+	expectCursor(t, "CUF and CUF 10", 11, 50)
+	send("\033[D\033[20D")
+	expectCursor(t, "CUB and CUB 20", 11, 29)
+	send("\033[99A\033[99D")
+	expectCursor(t, "CUU and CUB stop at the margins", 0, 0)
+	send("\033[99B\033[99C")
+	expectCursor(t, "CUD and CUF stop at the margins", Rows-1, Cols-1)
+
+	send("\033[5;15r")
+	expectCursor(t, "DECSTBM: home", 0, 0)
+	send("\033[10;1H\033[99A")
+	expectCursor(t, "CUU stops at the top margin", 4, 0)
+	send("\033[99B")
+	expectCursor(t, "CUD stops at the bottom margin", 14, 0)
+	send("\033[3;1H\033[99A")
+	expectCursor(t, "CUU above the top margin: the top line", 0, 0)
+	send("\033[3B")
+	expectCursor(t, "CUD above the top margin", 3, 0)
+	send("\033[20;1H\033[99B")
+	expectCursor(t, "CUD below the bottom margin: the bottom line", Rows-1, 0)
+	send("\033[99A")
+	expectCursor(t, "CUU from below the bottom margin", 4, 0)
+}
+
+func TestOrigin(t *testing.T) {
+	begin()
+	send("\033[5;15r\033[3;3H\033[?6h")
+	expectCursor(t, "DECOM set: home, the top margin", 4, 0)
+	send("\033[2;3H")
+	expectCursor(t, "CUP in origin mode", 5, 2)
+	send("\033[99;1H")
+	expectCursor(t, "CUP past the bottom margin in origin mode", 14, 0)
+	send("\033[6n")
+	expectAnswer(t, "CPR in origin mode", "\033[11;1R")
+	send("\033[?6l")
+	expectCursor(t, "DECOM reset: home, the top line", 0, 0)
+	send("\033[99;1H")
+	expectCursor(t, "CUP with DECOM reset", Rows-1, 0)
+}
+
+func TestScroll(t *testing.T) {
+	begin()
+	send(lines[0])
+	for i := 1; i < len(lines); i++ {
+		send("\r\n")
+		send(lines[i])
+	}
+	expectRow(t, "scrolled up by a line", 0, "1")
+	expectRow(t, "scrolled up by a line", Rows-1, "O")
+	expectCursor(t, "scrolled up by a line", Rows-1, 1)
+
+	send("\033[5;10r\033[10;1H\n")
+	expectRow(t, "IND at the bottom margin scrolls the region", 3, "4")
+	expectRow(t, "IND at the bottom margin scrolls the region", 4, "6")
+	expectRow(t, "IND at the bottom margin scrolls the region", 8, "A")
+	expectRow(t, "IND at the bottom margin scrolls the region", 9, "")
+	expectRow(t, "IND at the bottom margin scrolls the region", 10, "B")
+	expectCursor(t, "IND at the bottom margin", 9, 0)
+
+	send("\033[5;1H\033M")
+	expectRow(t, "RI at the top margin scrolls the region down", 3, "4")
+	expectRow(t, "RI at the top margin scrolls the region down", 4, "")
+	expectRow(t, "RI at the top margin scrolls the region down", 5, "6")
+	expectRow(t, "RI at the top margin scrolls the region down", 9, "A")
+	expectRow(t, "RI at the top margin scrolls the region down", 10, "B")
+	expectCursor(t, "RI at the top margin", 4, 0)
+
+	send("\033[24;1H\033D\033D")
+	expectRow(t, "IND below the bottom margin: no scroll", Rows-1, "O")
+	expectCursor(t, "IND on the last line below the bottom margin", Rows-1, 0)
+	send("\033[1;1H\033M")
+	expectRow(t, "RI above the top margin: no scroll", 0, "1")
+	expectCursor(t, "RI on the top line above the top margin", 0, 0)
+
+	send("\033[7;1Hq\033Er")
+	expectRow(t, "NEL", 7, "r")
+	expectCursor(t, "NEL", 7, 1)
+
+	send("\033[1;2r\033[1;1H")
+	expectCursor(t, "a region of two lines", 0, 0)
+	send("\033[3;3r\033[5;5H\033[4;2r\033[5;5H\033[5;25r")
+	expectCursor(t, "a region of one line, upside down or off the screen: ignored", 4, 4)
+	send("\033[r\033[24;1H\n")
+	expectRow(t, "DECSTBM with no parameters: the whole screen", 0, "2")
+}
+
+// The lines TestScroll fills the screen with, the first of which scrolls off.
+var lines = [Rows+1]string{
+	"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "C",
+	"D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O",
+}
+
+// fill fills the screen with E, and puts the cursor on the third line, in the
+// fifth column.
+func fill() {
+	begin()
+	send("\033#8\033[3;5H")
+}
+
+func TestErase(t *testing.T) {
+	fill()
+	for row := 0; row < Rows; row++ {
+		expectRun(t, "DECALN", row, 0, Cols-1, 'E')
+	}
+	expectCursor(t, "DECALN: the cursor stays", 2, 4)
+
+	send("\033[J")
+	expectRun(t, "ED: to the end of the screen", 1, 0, Cols-1, 'E')
+	expectRow(t, "ED: to the end of the screen, the cursor's cell too", 2, "EEEE")
+	expectBlank(t, "ED: to the end of the screen", 3, Rows-1)
+	expectCursor(t, "ED: the cursor stays", 2, 4)
+
+	fill()
+	send("\033[1J")
+	expectBlank(t, "ED 1: from the beginning of the screen", 0, 1)
+	expectRun(t, "ED 1: the cursor's cell too", 2, 0, 4, ' ')
+	expectRun(t, "ED 1", 2, 5, Cols-1, 'E')
+	expectRun(t, "ED 1", 3, 0, Cols-1, 'E')
+
+	fill()
+	send("\033[2J")
+	expectBlank(t, "ED 2: all of it", 0, Rows-1)
+	expectCursor(t, "ED 2: the cursor stays", 2, 4)
+
+	fill()
+	send("\033[K")
+	expectRow(t, "EL: to the end of the line, the cursor's cell too", 2, "EEEE")
+	expectRun(t, "EL", 1, 0, Cols-1, 'E')
+	expectRun(t, "EL", 3, 0, Cols-1, 'E')
+	expectCursor(t, "EL: the cursor stays", 2, 4)
+
+	fill()
+	send("\033[1K")
+	expectRun(t, "EL 1: from the beginning of the line, the cursor's cell too", 2, 0, 4, ' ')
+	expectRun(t, "EL 1", 2, 5, Cols-1, 'E')
+
+	fill()
+	send("\033[2K")
+	expectRow(t, "EL 2: all of the line", 2, "")
+	expectRun(t, "EL 2", 1, 0, Cols-1, 'E')
+	expectRun(t, "EL 2", 3, 0, Cols-1, 'E')
+}
+
+func TestRendition(t *testing.T) {
+	begin()
+	send("a\033[1mb\033[4mc\033[0md\033[5me\033[m\033[7mf\033[1;4;5;7mg\033[0;1mh")
+	expectCell(t, "none", 0, 0, normal|'a'<<16)
+	expectCell(t, "bold", 0, 1, bolder|'b'<<16)
+	expectCell(t, "bold and underscore", 0, 2, bolder|underlined|'c'<<16)
+	expectCell(t, "SGR 0: none", 0, 3, normal|'d'<<16)
+	expectCell(t, "blink", 0, 4, normal|blinking|'e'<<16)
+	expectCell(t, "reverse", 0, 5, black|white<<8|'f'<<16)
+	expectCell(t, "all four", 0, 6, black|bright<<8|underlined|blinking|'g'<<16)
+	expectCell(t, "0 and then 1", 0, 7, bolder|'h'<<16)
+
+	send("\033[7m\033[K")
+	expectCell(t, "what is erased has no rendition", 0, 9, normal|' '<<16)
+
+	send("\033[0m\033[?5h")
+	expectCell(t, "DECSCNM: dark on light", 0, 0, black|white<<8|'a'<<16)
+	expectCell(t, "DECSCNM: the reverse of the reverse", 0, 5, white|black<<8|'f'<<16)
+	expectCell(t, "DECSCNM: a blank", 5, 5, black|white<<8|' '<<16)
+	send("\033[1;9Hi\033[2J")
+	expectCell(t, "DECSCNM: what is erased", 0, 8, black|white<<8|' '<<16)
+	send("\033[1;9Hi")
+	expectCell(t, "DECSCNM: what is put", 0, 8, black|white<<8|'i'<<16)
+	send("\033[?5l")
+	expectCell(t, "DECSCNM reset", 0, 8, white|black<<8|'i'<<16)
+	expectCell(t, "DECSCNM reset: a blank", 5, 5, normal|' '<<16)
+}
+
+func TestCharacterSets(t *testing.T) {
+	begin()
+	send("#q\033(A#q\033(0#q\033(B#q")
+	expectRow(t, "SCS G0: ASCII, the United Kingdom, the special graphics", 0, "#q\xa3q#\x12#q")
+	send("\r\n\033)0x\x0ex\x0fx")
+	expectRow(t, "SO and SI: G1 and G0", 1, "x\x19x")
+	send("\r\n\033(2\x5f\x7e\033(1\x5f\x7e")
+	expectRow(t, "the alternate ROM's sets", 2, "\x00\x1f_~")
+}
+
+func TestSaveRestore(t *testing.T) {
+	begin()
+	send("\033[5;10H\033[1m\033(0\0337\033[H\033[m\033(Bq\0338q")
+	expectCursor(t, "DECRC: the position", 4, 10)
+	expectCell(t, "DECRC: the rendition and the set", 4, 9, bolder|0x12<<16)
+	expectCell(t, "before DECRC", 0, 0, normal|'q'<<16)
+	begin()
+	send("\033[5;10H\0338")
+	expectCursor(t, "DECRC with nothing saved: home", 0, 0)
+}
+
+func TestReports(t *testing.T) {
+	begin()
+	send("\033[c")
+	expectAnswer(t, "DA", "\033[?1;2c")
+	send("\033[0c")
+	expectAnswer(t, "DA 0", "\033[?1;2c")
+	send("\033Z")
+	expectAnswer(t, "DECID", "\033[?1;2c")
+	send("\033[5n")
+	expectAnswer(t, "DSR 5", "\033[0n")
+	send("\033[24;80H\033[6n\033[H\033[6n")
+	expectAnswer(t, "CPR", "\033[24;80R\033[1;1R")
+	send("\033[1c\033[>c\033[7n\033[?6n")
+	expectAnswer(t, "what the VT100 does not answer", "")
+
+	for i := 0; i < 20; i++ {
+		send("\033[c")
+	}
+	expectAnswer(t, "more than the host reads: whole answers", "\033[?1;2c\033[?1;2c\033[?1;2c\033[?1;2c\033[?1;2c\033[?1;2c\033[?1;2c\033[?1;2c\033[?1;2c")
+}
+
+func TestModes(t *testing.T) {
+	begin()
+	send("\033[20h1\n2")
+	expectRow(t, "LNM set: LF is a new line", 1, "2")
+	send("\033[20l\n3")
+	expectRow(t, "LNM reset", 2, " 3")
+	send("\033[?1h\033=")
+	if !term.cursorKeys || !term.keypad {
+		println("DECCKM and DECKPAM: not set")
+		t.Fail()
+	}
+	send("\033[?1l\033>")
+	if term.cursorKeys || term.keypad {
+		println("DECCKM and DECKPNM: not reset")
+		t.Fail()
+	}
+	send("\033[5;10r\033[3;3Hx\033[?3h")
+	expectBlank(t, "DECCOLM: the screen erased", 0, Rows-1)
+	expectCursor(t, "DECCOLM: home", 0, 0)
+	send("\033[10;1H\n")
+	expectCursor(t, "DECCOLM: the margins gone", 10, 0)
+	send("\033[?7;6h")
+	if !term.autowrap || !term.origin {
+		println("SM with two parameters: not both set")
+		t.Fail()
+	}
+	send("\033[?7;6l")
+	if term.autowrap || term.origin {
+		println("RM with two parameters: not both reset")
+		t.Fail()
+	}
+	send("\033[?4h\033[?8h\033[?9h\033[4h\033[?2h")
+	if !term.ansi {
+		println("?2h: VT52 mode")
+		t.Fail()
+	}
+	expectCursor(t, "modes that do nothing here", 0, 0)
+}
+
+func TestSequences(t *testing.T) {
+	begin()
+	send("\033[1;11H\033[\b3Cx")
+	expectCursor(t, "BS within a sequence: done, and the sequence goes on", 0, 13)
+	begin()
+	send("ab\033[3\030c\033(\032d")
+	expectRow(t, "CAN and SUB: the sequence ends, the error character shows", 0, "ab\x02c\x02d")
+	begin()
+	send("\033[3\033[2Cx")
+	expectRow(t, "ESC within a sequence begins another", 0, "  x")
+	begin()
+	send("\033[>1c\033[1 qx\033[1?hy\033 Fz\033#3w")
+	expectRow(t, "sequences the VT100 does not have: nothing", 0, "xyzw")
+	expectAnswer(t, "sequences the VT100 does not have: no answer", "")
+	begin()
+	send("\033[0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;1m\033[99999999Cx")
+	expectCell(t, "more parameters than count", 0, Cols-1, normal|'x'<<16)
+}
+
+func TestReset(t *testing.T) {
+	begin()
+	send("abc\033[5;10r\033[?6h\033[?5h\033[1m\033(0\033[?7l\033[3g\033[20h\033c")
+	send("\ta\033[99B\033[6n")
+	expectRow(t, "RIS: the screen blank, the tabs every eight", 0, "        a")
+	expectCell(t, "RIS: no rendition, ASCII, the screen dark", 0, 8, normal|'a'<<16)
+	expectAnswer(t, "RIS: the margins and origin gone", "\033[24;10R")
+	if !term.ansi || !term.autowrap || term.newline {
+		println("RIS: the modes")
+		t.Fail()
+	}
+}
+
+func TestVT52(t *testing.T) {
+	begin()
+	send("\033[?2l")
+	if term.ansi {
+		println("?2l: not VT52 mode")
+		t.Fail()
+	}
+	send("\033Y%*x")
+	expectCursor(t, "ESC Y", 5, 11)
+	expectRow(t, "ESC Y", 5, "          x")
+	send("\033A\033A\033B\033C\033C\033D")
+	expectCursor(t, "ESC A, B, C and D", 4, 12)
+	send("\033Y  \033A\033D")
+	expectCursor(t, "ESC A and D at the margins", 0, 0)
+	send("\033Y7o\033B\033C")
+	expectCursor(t, "ESC B and C at the margins", Rows-1, Cols-1)
+	send("\033H")
+	expectCursor(t, "ESC H", 0, 0)
+	send("\033[2J")
+	expectRow(t, "ESC [ is not a sequence in VT52 mode", 0, "2J")
+	send("\033H\033J")
+	expectBlank(t, "ESC H and ESC J", 0, Rows-1)
+	send("\033Y! 1\033I2\033I3")
+	expectRow(t, "ESC I at the top scrolls down", 0, "  3")
+	expectRow(t, "ESC I at the top scrolls down", 1, " 2")
+	expectRow(t, "ESC I at the top scrolls down", 2, "1")
+	expectCursor(t, "ESC I", 0, 3)
+	send("\033Y!!\033K")
+	expectRow(t, "ESC K", 1, "")
+	expectRow(t, "ESC K", 2, "1")
+	send("\033Y! \033J")
+	expectBlank(t, "ESC J", 1, Rows-1)
+	expectRow(t, "ESC J", 0, "  3")
+	send("\033Fq\033Gq")
+	expectRow(t, "ESC F and G", 1, "\x12q")
+	send("\033Z")
+	expectAnswer(t, "ESC Z", "\033/Z")
+	send("\033=")
+	if !term.keypad {
+		println("ESC =: not the alternate keypad")
+		t.Fail()
+	}
+	send("\033>\033<")
+	if term.keypad || !term.ansi {
+		println("ESC > and ESC <")
+		t.Fail()
+	}
+	send("\033[H")
+	expectCursor(t, "ANSI mode again", 0, 0)
+}
