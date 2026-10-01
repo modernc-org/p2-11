@@ -12,8 +12,12 @@ import (
 // No monitor is needed: what the test looks at is the vertical sync, which is
 // a pin any cog can read. The horizontal sync is a DAC, whose input does not
 // follow it. Nothing is on the pins of the board from 16. A monitor there shows
-// a VT100's screen that says hello, for as long as the test takes.
+// a VT100's screen that says hello, for as long as the test takes, which is ten
+// seconds: a monitor can take some of them before it trusts what it is sent.
 const pin = 16
+
+// frames is how many frames the test times, 10.08 s of them.
+const frames = 600
 
 var term vt100.Terminal
 
@@ -52,7 +56,7 @@ func TestFrames(t *testing.T) {
 		return
 	}
 	begin := p2.GetUs()
-	for i := 0; i < 60; i++ {
+	for i := 0; i < frames; i++ {
 		if !edge(pin + 4) {
 			printf("no vertical sync after %d frames\n", i)
 			t.Fail()
@@ -69,9 +73,9 @@ func TestFrames(t *testing.T) {
 	pulse := p2.GetUs() - begin
 	Stop()
 
-	printf("60 frames in %d us, the sync %d us, at %d Hz\n", us, pulse, p2.ClockFreq())
-	if us < 60*16800-60 || us > 60*16800+60 {
-		println("want 1008000 us")
+	printf("%d frames in %d us, the sync %d us, at %d Hz\n", frames, us, pulse, p2.ClockFreq())
+	if us < frames*16800-60 || us > frames*16800+60 {
+		printf("want %d us\n", frames*16800)
 		t.Fail()
 	}
 	if pulse < 60 || pulse > 64 {
