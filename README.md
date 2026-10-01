@@ -81,6 +81,7 @@ timing itself. [scripts/record.py](scripts/record.py) makes the recording.
 | RT-11 V4, the single job monitor | runs |
 | Unix V6 | runs, and compiles |
 | KT11-D memory management, 248 KB | there |
+| a VT100 on a VGA monitor of its own, for the console | begun: the terminal and the screen are there, and wait for a monitor on the board |
 
 The processor is tested against the PDP-11/40 of
 [SimH](https://opensimh.org): 2902 cases of a machine before an instruction and
@@ -105,6 +106,13 @@ Without Go, a binary of it for Linux, macOS or Windows is among
 [its releases](https://github.com/modernc-org/ogo/releases); v0.46.0 is the
 one this was last tested with.
 
+The tests want v0.47.1 or a later one, which has no binaries yet: those of the
+screen call a driver written in Spin2, which no release before it could.
+
+```sh
+go install modernc.org/ogo@v0.47.1
+```
+
 ```sh
 ogo run                                  # build, load, and open a terminal
 ogo build --unchecked --clock 200MHz     # as fast as it goes: 148,385 a second
@@ -128,14 +136,17 @@ scripts/card.py put RK0.DSK RK0.DSK      # a pack onto the card, through the boa
 | [card](card) | a second program: puts a file onto the card and sums one there, over the serial line |
 | [fat](fat) | where on a disk a file of its FAT32 volume is |
 | [mac](mac) | the PDP-11 programs it carries, in MACRO-11 and assembled |
-| [scripts](scripts) | what makes the test vectors, assembles the programs, runs the tests under Go, and draws the logo |
+| [vt100](vt100) | a VT100's screen: what a host's characters and sequences do to it |
+| [vga](vga) | that screen on a VGA monitor, with [Eric Smith's tile driver](https://github.com/totalspectrum/p2_vga_text) and Unscii's font |
+| [scripts](scripts) | what makes the test vectors, assembles the programs, makes the font, runs the tests under Go, and draws the logo |
 
 The cogs share memory and no lock: every variable two of them share is
 written by one of them only.
 
-Only the two programs and `sd` know about the Propeller 2. The other
+Only the two programs, `sd` and `vga` know about the Propeller 2. The other
 packages are Go once they are given a package clause, which is how their tests
-also run where there is no board. `sd` and `fat` know nothing about the PDP-11.
+also run where there is no board. `sd`, `fat`, `vt100` and `vga` know nothing
+about the PDP-11.
 
 What writing it found out about OctoGo is in [OCTOGO.md](OCTOGO.md).
 
