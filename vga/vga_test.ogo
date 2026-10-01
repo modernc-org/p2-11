@@ -1,0 +1,81 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+import (
+	"p2"
+	"testing"
+
+	"modernc.org/p2-11/vt100"
+)
+
+// No monitor is needed: what the test looks at is the vertical sync, which is
+// a pin any cog can read. The horizontal sync is a DAC, whose input does not
+// follow it. Nothing is on the pins of the board from 16. A monitor there shows
+// a VT100's screen that says hello, for as long as the test takes.
+const pin = 16
+
+var term vt100.Terminal
+
+// edge waits for the pin to go low after it was high, for a tenth of a second
+// at most, and reports whether it did.
+func edge(pin int) bool {
+	begin := p2.GetUs()
+	for p2.PinIn(pin) == 0 {
+		if p2.GetUs()-begin > 100000 {
+			return false
+		}
+	}
+	for p2.PinIn(pin) != 0 {
+		if p2.GetUs()-begin > 100000 {
+			return false
+		}
+	}
+	return true
+}
+
+// A frame is 525 lines of 800 pixels, at 25 MHz 16.8 ms, whatever the clock.
+func TestFrames(t *testing.T) {
+	term.Reset()
+	for _, b := range []byte("\033[7mHello\033[m from a VT100 on a P2\r\n") {
+		term.Put(b)
+	}
+	if !Start(pin, (*uint32)(&term.Screen[0]), vt100.Cols, vt100.Rows, &Font) {
+		println("no cog for the driver")
+		t.Fail()
+		return
+	}
+	if !edge(pin + 4) {
+		println("no vertical sync")
+		t.Fail()
+		Stop()
+		return
+	}
+	begin := p2.GetUs()
+	for i := 0; i < 60; i++ {
+		if !edge(pin + 4) {
+			printf("no vertical sync after %d frames\n", i)
+			t.Fail()
+			Stop()
+			return
+		}
+	}
+	us := p2.GetUs() - begin
+
+	// The pin went low a moment ago, and the sync is two lines, 64 us.
+	begin = p2.GetUs()
+	for p2.PinIn(pin+4) == 0 && p2.GetUs()-begin < 1000 {
+	}
+	pulse := p2.GetUs() - begin
+	Stop()
+
+	printf("60 frames in %d us, the sync %d us, at %d Hz\n", us, pulse, p2.ClockFreq())
+	if us < 60*16800-60 || us > 60*16800+60 {
+		println("want 1008000 us")
+		t.Fail()
+	}
+	if pulse < 60 || pulse > 64 {
+		println("want 64 us, less what finding the edge took")
+		t.Fail()
+	}
+}

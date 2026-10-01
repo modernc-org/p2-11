@@ -1,0 +1,91 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package vga shows a screen of characters on a VGA monitor, 640 by 480 at
+// 60 Hz, 8 by 16 dots a character.
+//
+// What drives the monitor is the tile driver of
+// github.com/totalspectrum/p2_vga_text, by Eric Smith, MIT, which is
+// vga_tile_driver.spin2 as it was at b50cec6, with LICENSE-p2_vga_text, the
+// license of its repository. It is PASM on a cog of its own, and reads the
+// screen and the font from hub RAM a line at a time for as long as it runs, so
+// what is written into them is on the monitor a frame later, and nothing else
+// is needed of the program.
+//
+// A cell is four bytes: the colour of the character and that of its
+// background, as numbers of the ANSI palette of 256, the character, and its
+// effects, as package vt100 has them. The font is 16 lines of 256 bytes: the
+// top line of every character, from character 0, and then the next.
+//
+// The monitor is on five pins: the horizontal sync and the three colours, from
+// the first, and the vertical sync, the fifth. The four before the last are
+// DACs of the P2's.
+//
+// It runs on the board only: the host's compiler cannot build a program that
+// calls a Spin2 object.
+
+import (
+	"p2"
+	"unsafe"
+)
+
+const (
+	pixelClock = 25_000_000
+
+	// A line is 640 pixels of 800, and a frame 480 lines of 525, both syncs
+	// negative.
+	hFront   = 16
+	hSync    = 96
+	hBack    = 48
+	vFront   = 10
+	vSync    = 2
+	vBack    = 33
+	seen     = 480
+	negative = 0b11
+
+	fontWidth  = 8
+	fontHeight = 16
+	cellSize   = 4 // bytes
+)
+
+// start and stop are the driver's.
+func start(params *[16]uint32) int
+func stop()
+
+// params is what the driver reads when its cog starts, which is after start
+// has returned.
+var params [16]uint32
+
+// Start shows cols times rows cells from cells, in font, on the monitor whose
+// pins begin at pin. A screen of fewer lines than a frame has is in its middle.
+// It reports whether there was a cog for the driver, which takes one more for a
+// moment when it starts. What cells and font point at is read for as long as the
+// driver runs.
+func Start(pin int, cells *uint32, cols, rows int, font *[1024]uint32) bool {
+	blank := uint32(seen-rows*fontHeight) / 2
+	params = [16]uint32{
+		uint32(pin),
+		uint32(uintptr(unsafe.Pointer(cells))),
+		uint32(cols),
+		uint32(rows),
+		uint32(uintptr(unsafe.Pointer(font))),
+		fontWidth,
+		fontHeight,
+		uint32(uint64(1<<31) * pixelClock / uint64(p2.ClockFreq())), // the pixel clock, of the system's
+		hFront,
+		hSync,
+		hBack,
+		vFront + blank,
+		vSync,
+		vBack + blank,
+		negative,
+		cellSize,
+	}
+	return start(&params) != 0
+}
+
+// Stop stops the driver's cog, which lets go of the pins.
+func Stop() {
+	stop()
+}
