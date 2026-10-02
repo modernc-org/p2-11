@@ -14,15 +14,19 @@ has put things.
 An entry is removed when `ogo` no longer shows it and the emulator no longer
 works around it. What was found and is closed is at the end, by name.
 
-Of the two that are open, both are one: what the backend makes of the C it is
+Of the three that are open, all are one: what the backend makes of the C it is
 given. A call is dear, and what is not inlined is called. `ogo` v0.46.0, of
 2026-09-29, changed both: it inlines a function of six statements at most
-itself, a branch or a check in it or not. The tables are of the compilers
-before it, as said above; what v0.46.0 makes of the same helpers is under each,
-as `../ogo`'s CHANGELOG measured it on a P2-EDGE at 160 MHz. The two stay open
-because the emulator is still written for what a call costs: with v0.46.0 it
-runs 0.1% faster than with `--no-inline`, in all three builds, its hot path
-having no small function left to inline.
+itself, a branch or a check in it or not. The tables of 1 and 2 are of the
+compilers before it, as said above; what v0.46.0 makes of the same helpers is
+under each, as `../ogo`'s CHANGELOG measured it on a P2-EDGE at 160 MHz. The
+two stay open because the emulator is still written for what a call costs:
+with v0.46.0 it runs 0.1% faster than with `--no-inline`, in all three builds,
+its hot path having no small function left to inline. 3 is what a profile of
+the emulator found on 2026-10-02, with `ogo`
+v0.47.2-0.20261002103426-b80a9c3f7bab+dirty, of where the clocks go in code
+that runs from hub memory, as the emulator's does: into the saving of a
+function's registers at every call, and into jumps.
 
 ## 1. A call is dear, and a function with a branch in it was called
 
@@ -105,6 +109,121 @@ accessors of a word 102 where 395: the call was most of what a check cost.
 
 The emulator as it is now loses less to them, its checks being few a call:
 114,904 instructions a second checked and 131,113 unchecked.
+
+## 3. A function that calls another saves its registers, and a jump from hub memory costs 19
+
+The emulator was profiled on 2026-10-02: `prof/` in the repository runs each
+shape of instruction in a loop and says what one costs, and a program of loops,
+below, what the backend's own conventions cost. Everything here is
+`--unchecked` at 160 MHz unless said otherwise, and the code runs from hub
+memory, which a loop with a call in it does: FCACHE copies into cog memory only
+a loop that calls nothing. The tables of 1 and 2 were measured in loops it had
+copied, which is why their numbers are smaller than these.
+
+| In a loop of 100,000, an iteration that | Clocks from hub memory | From cog memory |
+| --- | --- | --- |
+| adds to a word of the hub | 56 | 40 |
+| reads a word of the hub as well | 93 | 65 |
+| writes a word of the hub, and nothing else | 45 | 33 |
+| takes one of two branches, alternately | 76 | 44 |
+| goes through a `switch` of eight, every case in turn | 141 | 75 |
+| calls a leaf of two hub reads and a branch | 201 | 201 |
+| calls a function that calls that leaf, saving 4 registers | 369 | 370 |
+
+```go
+// leaf calls nothing, and is too long to be inlined.
+func leaf(s []uint32, a uint32) uint32 {
+	v := s[a&63]
+	if v > a {
+		v -= a
+	} else {
+		v += a
+	}
+	v ^= a << 3
+	v += s[v&63]
+	if v&1 != 0 {
+		v = v*3 + 1
+	}
+	return v + a
+}
+
+// guard has a guard clause that is never taken, and then calls a leaf.
+func guard(s []uint32, a uint32) uint32 {
+	if a == 0xffffffff {
+		return 0
+	}
+	return leaf(s, a)
+}
+```
+
+The column from cog memory is the same program built as `ogo` builds it; the
+one from hub memory is built with `--fcache=0` given to the backend, which
+`ogo` does not do, so that the loops run where the emulator's code runs. The
+loops with a call in them are not copied either way.
+
+So: a taken jump costs 19 clocks from hub memory and 4 from cog or LUT memory,
+and a `switch` is a chain of them, 19 for every case it passes; a hub read
+costs 25 to 37 and a write about 10; a leaf costs its call and return, about
+40, and its body; and a function that calls another costs 150 to 160 clocks a
+call besides. That is the backend's convention: a function that is not a leaf
+has its locals in a pool of registers every such function shares, `local01` on,
+and saves all of them to the hub stack on the way in and restores them on the
+way out, `pushregs_` and `popregs_` in the assembly, each a routine in cog
+memory that returns to hub memory, which costs a reload of the instruction
+FIFO, three a call. A leaf has registers of its own, `_var01` on, and saves
+nothing. spin2cpp's `NeedToSaveLocals` in `backends/asm/outasm.c` answers true
+for every function that is not a leaf, with a FIXME above it about saving only
+what is used before the first call.
+
+What that does to the emulator, in clocks an instruction before and after the
+dispatch moved from `execute`, a function of its own, into `Run`:
+
+| Instruction | Before | After |
+| --- | --- | --- |
+| `SOB`, taken | 747 | 481 |
+| `BR` | 763 | 545 |
+| `MOV R1,R2` | 1043 | 865 |
+| `MOV (R1)+,R2` | 1735 | 1543 |
+| `ADD R2,(R1)+` | 2872 | 2663 |
+
+`execute` was called for every instruction, 155 clocks, and found SOB, a tenth
+of what Unix V6 executes, after fifteen comparisons, each a taken jump. The
+benchmark went from 104,089 to 120,526 instructions a second checked, and from
+118,360 to 137,292 unchecked. An instruction now costs `Run`'s loop, about 350
+clocks, a call of its function, 155 for `double` and `single` and 40 for the
+leaf `branch`, and its body; an operand in memory costs the calls of `address`
+and `read`, 680 in all, and one written back `write` as well, 1800 for
+`ADD R2,(R1)+`.
+
+What else was tried, with the C the compiler emits kept and given back to it:
+
+- `-O2` to the backend, which adds common subexpressions, loop strength
+  reduction, aggressive memory and cold code: 103,414 against 103,661 checked
+  and 116,495 against 117,946 unchecked. Nothing.
+- `read` placed in LUT memory with `__attribute__((lut))`, which flexspin's C
+  has and OctoGo does not: `MOV (R1)+,R2` 1322 where 1536, `MOV 2(R1),R2` 1633
+  where 2075, and the benchmark 148,240 a second where 138,611, 7% from one
+  function of 151 longs. `address` there instead, 168 longs: 146,449. The
+  branches in LUT memory cost 4, and the FIFO is not reloaded on the way in.
+  The LUT holds 240 longs of code as the backend lays it out, from 528 to 768,
+  the top 256 longs being kept for FCACHE whether `--fcache=0` is given or not;
+  `double` and `read` together, 457 longs, would not fit, and the hot path,
+  `Run`, `double`, `single`, `address`, `read`, `write` and `branch`, is 1,460.
+  A pragma that places a function, and a way to spend the LUT, are what OctoGo
+  would need.
+- `read`, `address` and `write` marked with the attribute `ogo` marks a small
+  function with, `__attribute__((inline))`: the backend left them as they were.
+
+Checked, the emulator is 14% slower than unchecked, 120,526 against 137,292:
+the receiver `m` is tested for nil at every access to a field of it, four
+instructions a time and twelve of them on `Run`'s path to an instruction, and
+`m.R[ir>>6&7]` is bounds-checked though the index is three bits. And every
+operation on a `uint16` is followed by a `getword` that keeps it one, 94 of
+them in `double`, two clocks each.
+
+**Meanwhile:** the dispatch is in `Run`, what comes most often first, and the
+rest stays as it is: what is left to gain is in the backend's hands, a call
+that saves less, a jump that costs less, and the LUT.
 
 ## Found here and closed
 

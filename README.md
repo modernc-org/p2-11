@@ -19,7 +19,7 @@ with its own compiler and runs it, on the board as in SimH.
 
 ```
 $ ogo run
-303004 instructions in 2898 ms, 104556 a second
+303004 instructions in 2514 ms, 120526 a second
 60 cycles of the line clock in 988 ms
 
 PDP-11/40 on a Propeller 2, in OctoGo
@@ -115,7 +115,7 @@ go install modernc.org/ogo@v0.47.1
 
 ```sh
 ogo run                                  # build, load, and open a terminal
-ogo build --unchecked --clock 200MHz     # as fast as it goes: 148,385 a second
+ogo build --unchecked --clock 200MHz     # as fast as it goes: 171,673 a second
 ogo test ./...                           # the tests, on the board
 scripts/twin.sh                          # the packages' tests under Go, no board needed
 scripts/talk.py                          # a talk with RT-11 on the pack, on the board and in SimH
@@ -134,6 +134,7 @@ scripts/card.py put RK0.DSK RK0.DSK      # a pack onto the card, through the boa
 | [rk11](rk11) | the disk controller and its drives |
 | [sd](sd) | an SD card's blocks, read and written over SPI |
 | [card](card) | a second program: puts a file onto the card and sums one there, over the serial line |
+| [prof](prof) | a third: runs each shape of instruction in a loop and says what one costs in clocks |
 | [fat](fat) | where on a disk a file of its FAT32 volume is |
 | [mac](mac) | the PDP-11 programs it carries, in MACRO-11 and assembled |
 | [vt100](vt100) | a VT100's screen: what a host's characters and sequences do to it |

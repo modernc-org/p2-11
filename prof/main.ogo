@@ -1,0 +1,206 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Command prof measures what the machine spends on an instruction of each
+// shape, in clocks, on the board. A shape is run in a loop, eight copies of
+// it to a pass and then sixteen, and the difference is what the eight cost:
+// the loop and whatever else the machine does on the way are the same in
+// both and fall out.
+//
+// It is built and run as the emulator is, checked or not and at the clock
+// asked for, which is what the measurement is of.
+
+import (
+	"p2"
+
+	"modernc.org/p2-11/dl11"
+	"modernc.org/p2-11/kw11"
+	"modernc.org/p2-11/mac"
+	"modernc.org/p2-11/pdp11"
+	"modernc.org/p2-11/rk11"
+)
+
+const (
+	code  = 0o1000 // where the loop is
+	table = 0o2000 // 64 words the operands in memory are in
+	sub   = 0o3000 // a subroutine that returns at once
+	n     = 1000   // passes of the loop
+)
+
+var (
+	machine pdp11.Machine
+	console dl11.Line
+	clock   kw11.Clock
+	disk    rk11.Controller
+	memory  [pdp11.IOPage / 2]uint16
+)
+
+// A shape is an instruction, or two that undo each other, whose cost is
+// measured.
+type shape struct {
+	name  string
+	words [3]uint16 // the instruction and what follows it
+	n     int       // how many of the words
+	each  int       // how many instructions a copy is
+	unit  bool      // with the memory management on
+}
+
+var shapes = [...]shape{
+	{"NOP", [3]uint16{0o000240}, 1, 1, false},
+	{"INC R3", [3]uint16{0o005203}, 1, 1, false},
+	{"CLR R3", [3]uint16{0o005003}, 1, 1, false},
+	{"TST R3", [3]uint16{0o005703}, 1, 1, false},
+	{"ASL R3", [3]uint16{0o006303}, 1, 1, false},
+	{"MOV R1,R2", [3]uint16{0o010102}, 1, 1, false},
+	{"CMP R1,R2", [3]uint16{0o020102}, 1, 1, false},
+	{"ADD R1,R2", [3]uint16{0o060102}, 1, 1, false},
+	{"BIC R1,R2", [3]uint16{0o040102}, 1, 1, false},
+	{"MOV #1,R2", [3]uint16{0o012702, 1}, 2, 1, false},
+	{"MOV (R1)+,R2", [3]uint16{0o012102}, 1, 1, false},
+	{"MOV R2,(R1)+", [3]uint16{0o010221}, 1, 1, false},
+	{"MOV (R1),R2", [3]uint16{0o011102}, 1, 1, false},
+	{"MOV 2(R1),R2", [3]uint16{0o016102, 2}, 2, 1, false},
+	{"MOV R2,2(R1)", [3]uint16{0o010261, 2}, 2, 1, false},
+	{"MOV @#table,R2", [3]uint16{0o013702, table}, 2, 1, false},
+	{"ADD R2,(R1)+", [3]uint16{0o062211}, 1, 1, false},
+	{"CMP (R1)+,R2", [3]uint16{0o022102}, 1, 1, false},
+	{"TST (R1)+", [3]uint16{0o005721}, 1, 1, false},
+	{"INC (R1)+", [3]uint16{0o005221}, 1, 1, false},
+	{"CLR (R1)+", [3]uint16{0o005021}, 1, 1, false},
+	{"MOVB (R1)+,R2", [3]uint16{0o112102}, 1, 1, false},
+	{"TSTB (R1)+", [3]uint16{0o105721}, 1, 1, false},
+	{"CMPB (R1)+,R2", [3]uint16{0o122102}, 1, 1, false},
+	{"MOV R1,-(SP); MOV (SP)+,R1", [3]uint16{0o010146, 0o012601}, 2, 2, false},
+	{"BR .+2", [3]uint16{0o000400}, 1, 1, false},
+	{"BEQ .+2, not taken", [3]uint16{0o001400}, 1, 1, false},
+	{"BCS .+2, not taken", [3]uint16{0o103400}, 1, 1, false},
+	{"SOB R4,.+2", [3]uint16{0o077400}, 1, 1, false},
+	{"JSR PC,@#sub; RTS PC", [3]uint16{0o004737, sub}, 2, 2, false},
+	{"JMP @#.+4", [3]uint16{0o000137, 0}, 2, 1, false},
+	{"MUL R1,R2", [3]uint16{0o070201}, 1, 1, false},
+	{"ASH #3,R2", [3]uint16{0o072227, 3}, 2, 1, false},
+	{"MOV R3,-(SP); MTPI (R1)+", [3]uint16{0o010346, 0o006621}, 2, 2, false},
+	{"MFPI (R1)+; MOV (SP)+,R3", [3]uint16{0o006521, 0o012603}, 2, 2, false},
+
+	{"unit on: INC R3", [3]uint16{0o005203}, 1, 1, true},
+	{"unit on: MOV R1,R2", [3]uint16{0o010102}, 1, 1, true},
+	{"unit on: MOV #1,R2", [3]uint16{0o012702, 1}, 2, 1, true},
+	{"unit on: MOV (R1)+,R2", [3]uint16{0o012102}, 1, 1, true},
+	{"unit on: MOV R2,(R1)+", [3]uint16{0o010221}, 1, 1, true},
+	{"unit on: ADD R2,(R1)+", [3]uint16{0o062211}, 1, 1, true},
+	{"unit on: MOV 2(R1),R2", [3]uint16{0o016102, 2}, 2, 1, true},
+	{"unit on: BR .+2", [3]uint16{0o000400}, 1, 1, true},
+	{"unit on: SOB R4,.+2", [3]uint16{0o077400}, 1, 1, true},
+	{"unit on: JSR PC,@#sub; RTS PC", [3]uint16{0o004737, sub}, 2, 2, true},
+	{"unit on: MOV R3,-(SP); MTPI (R1)+", [3]uint16{0o010346, 0o006621}, 2, 2, true},
+	{"unit on: MFPI (R1)+; MOV (SP)+,R3", [3]uint16{0o006521, 0o012603}, 2, 2, true},
+}
+
+// attach puts the devices on the bus as the emulator does, so that the
+// machine asks them as it does there. Their cogs do not run.
+func attach() bool {
+	console.Pace(&machine, 1000)
+	disk.Connect(&machine, 0)
+	return machine.Attach(&clock, 0o177546, kw11.Size, 6) &&
+		machine.Attach(&disk, 0o177400, rk11.Size, 5) &&
+		machine.Attach(&console, 0o177560, dl11.Size, 4)
+}
+
+// unit turns the memory management on with every page of the kernel where its
+// address says.
+func unit() {
+	for p := uint16(0); p < 7; p++ {
+		machine.Deposit(0o172340+2*p, p<<7)
+		machine.Deposit(0o172300+2*p, 0o077406)
+	}
+	machine.Deposit(0o172356, 0o7600)
+	machine.Deposit(0o172316, 0o077406)
+	machine.Deposit(0o177572, 1)
+}
+
+// put deposits a word at *a and steps *a past it.
+func put(a *uint16, v uint16) {
+	machine.Deposit(*a, v)
+	*a += 2
+}
+
+// clocks runs the loop with k copies of the shape in each pass and answers how
+// many clocks it took, or 0 if the machine did not do what it should.
+func clocks(s *shape, k int) uint32 {
+	machine.Reset()
+	a := uint16(code)
+	put(&a, 0o012705) // MOV #n, R5
+	put(&a, n)
+	put(&a, 0o012704) // MOV #0, R4
+	put(&a, 0)
+	loop := a
+	put(&a, 0o012701) // MOV #table, R1
+	put(&a, table)
+	for i := 0; i < k; i++ {
+		for j := 0; j < s.n; j++ {
+			v := s.words[j]
+			if s.words[0] == 0o000137 && j == 1 {
+				v = a + 2 // JMP @#.+4: to the word after the address
+			}
+			put(&a, v)
+		}
+	}
+	put(&a, 0o077500|(a+2-loop)>>1) // SOB R5, loop
+	put(&a, 0)                      // HALT
+	machine.Deposit(sub, 0o000207)  // RTS PC
+	for i := uint16(0); i < 64; i++ {
+		machine.Deposit(table+2*i, 1)
+	}
+	if s.unit {
+		unit()
+	}
+	machine.R[6] = code
+	machine.R[7] = code
+
+	t := p2.GetCt()
+	for {
+		switch machine.Run(1 << 20) {
+		case pdp11.Halted:
+			t = p2.GetCt() - t
+			want := uint32(2 + n*(2+k*s.each) + 1)
+			if machine.Count != want {
+				printf("%s: %d instructions, want %d\n", s.name, machine.Count, want)
+				return 0
+			}
+			return t
+		case pdp11.Faulted:
+			printf("%s: faulted, PC %06o\n", s.name, machine.R[7])
+			return 0
+		}
+	}
+}
+
+func main() {
+	machine.Memory(memory[:])
+	if !attach() {
+		println("no room on the bus")
+		return
+	}
+	// The benchmark the emulator runs first, for the same number.
+	machine.Reset()
+	machine.Load(mac.BenchAt, mac.Bench[:])
+	machine.R[7] = mac.BenchStart
+	t := p2.GetMs()
+	for machine.Run(1<<20) != pdp11.Halted {
+	}
+	t = p2.GetMs() - t
+	printf("%d instructions in %d ms, %d a second\n", machine.Count, t, uint64(machine.Count)*1000/uint64(t))
+
+	printf("%d MHz, %d passes, clocks an instruction:\n", p2.ClockFreq()/1000000, n)
+	for i := 0; i < len(shapes); i++ {
+		s := &shapes[i]
+		t8 := clocks(s, 8)
+		t16 := clocks(s, 16)
+		if t8 == 0 || t16 == 0 {
+			continue
+		}
+		printf("%-36s %5d\n", s.name, (t16-t8)/uint32(8*n*s.each))
+	}
+	println("done")
+}
