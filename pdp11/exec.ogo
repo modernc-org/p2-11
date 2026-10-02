@@ -9,10 +9,10 @@
 //
 // What is written here is written for a processor on which a call costs as
 // much as fifty instructions and a function with a branch in it is not
-// inlined. So Run fetches an instruction where it stands, execute finds the
-// function that does it and that function is all there is to most of them: an
-// operand in a register is dealt with where it is met, and only an operand in
-// memory is worth the calls that find and fetch it.
+// inlined. So Run fetches an instruction where it stands and finds the
+// function that does it, and that function is all there is to most of them:
+// an operand in a register is dealt with where it is met, and only an operand
+// in memory is worth the calls that find and fetch it.
 
 // Step takes the traps and the interrupt that are due and then executes one
 // instruction. A trap an instruction ends in is taken by the step after it.
@@ -93,7 +93,87 @@ func (m *Machine) Run(n uint32) State {
 				}
 			}
 			m.R[7] = pc + 2
-			m.execute(ir)
+
+			// The instruction, found by its upper bits, what comes most
+			// often first: the two-operand instructions are half of what
+			// a program does, the branches a sixth and SOB a tenth.
+			c := ir >> 12
+			switch {
+			case c&7 != 0 && c&7 != 7:
+				if c >= 0o11 && c <= 0o15 {
+					m.double(ir, 1) // the byte instructions; SUB is 16
+				} else {
+					m.double(ir, 2)
+				}
+			case ir&0o077777 < 0o004000 && ir&0o177400 != 0: // 000400 to 003777 and 100000 to 103777
+				m.branch(ir)
+			case c == 0o07: // 070000 to 077777
+				switch ir >> 9 & 7 {
+				case 7: // SOB
+					r := ir >> 6 & 7
+					v := m.R[r] - 1
+					m.R[r] = v
+					if v != 0 {
+						m.R[7] -= ir & 0o77 << 1
+					}
+				case 0:
+					m.mul(ir)
+				case 1:
+					m.div(ir)
+				case 2:
+					m.ash(ir)
+				case 3:
+					m.ashc(ir)
+				case 4:
+					m.xor(ir)
+				default: // the floating instruction set and the commercial one
+					m.traps |= trapReserved
+				}
+			case c == 0o00: // 000000 to 007777, the branches taken out
+				op := ir >> 6 & 0o77
+				switch {
+				case op >= 0o50 && op < 0o64:
+					m.single(ir, 2)
+				case op == 0o66:
+					m.mtpi(ir)
+				case op >= 0o40 && op < 0o50:
+					m.jsr(ir)
+				case op == 0o02:
+					m.group0002(ir)
+				case op == 0o65:
+					m.mfpi(ir)
+				case op == 0o01:
+					m.jmp(ir)
+				case op == 0o00:
+					m.control(ir)
+				case op == 0o03:
+					m.swab(ir)
+				case op == 0o64:
+					m.mark(ir)
+				case op == 0o67:
+					m.sxt(ir)
+				default:
+					m.traps |= trapReserved
+				}
+			case c == 0o10: // 100000 to 107777, the branches taken out
+				op := ir >> 6 & 0o77
+				switch {
+				case op >= 0o50 && op < 0o64:
+					m.single(ir, 1)
+				case op < 0o44:
+					m.traps |= trapEMT
+				case op < 0o50:
+					m.traps |= trapTRAP
+				case op == 0o65: // MFPD, which without separate data space is MFPI
+					m.mfpi(ir)
+				case op == 0o66: // MTPD
+					m.mtpi(ir)
+				default:
+					m.traps |= trapReserved
+				}
+			default: // the floating point processor's
+				m.traps |= trapReserved
+			}
 			n--
 			left--
 			if left == 0 || m.traps != 0 {
@@ -112,92 +192,6 @@ func (m *Machine) Run(n uint32) State {
 	m.Count += all - n
 	m.now = from + all - n
 	return state
-}
-
-// execute does what the instruction ir says. The program counter is past it.
-// An instruction is found by its upper bits, and the ones that come most often
-// are asked for first.
-func (m *Machine) execute(ir uint16) {
-	op := ir >> 6 & 0o77
-	switch ir >> 12 {
-	case 0o01, 0o02, 0o06, 0o16, 0o03, 0o04, 0o05:
-		m.double(ir, 2)
-
-	case 0o00: // 000000 to 007777
-		switch {
-		case op >= 0o50 && op < 0o64:
-			m.single(ir, 2)
-		case op >= 0o04 && op < 0o40:
-			m.branch(ir)
-		case op >= 0o40 && op < 0o50:
-			m.jsr(ir)
-		case op == 0o02:
-			m.group0002(ir)
-		case op == 0o01:
-			m.jmp(ir)
-		case op == 0o00:
-			m.control(ir)
-		case op == 0o03:
-			m.swab(ir)
-		case op == 0o64:
-			m.mark(ir)
-		case op == 0o65:
-			m.mfpi(ir)
-		case op == 0o66:
-			m.mtpi(ir)
-		case op == 0o67:
-			m.sxt(ir)
-		default:
-			m.traps |= trapReserved
-		}
-
-	case 0o10: // 100000 to 107777
-		switch {
-		case op < 0o40:
-			m.branch(ir)
-		case op >= 0o50 && op < 0o64:
-			m.single(ir, 1)
-		case op < 0o44:
-			m.traps |= trapEMT
-		case op < 0o50:
-			m.traps |= trapTRAP
-		case op == 0o65: // MFPD, which without separate data space is MFPI
-			m.mfpi(ir)
-		case op == 0o66: // MTPD
-			m.mtpi(ir)
-		default:
-			m.traps |= trapReserved
-		}
-
-	case 0o11, 0o12, 0o13, 0o14, 0o15:
-		m.double(ir, 1)
-
-	case 0o07: // 070000 to 077777
-		switch ir >> 9 & 7 {
-		case 7: // SOB
-			r := ir >> 6 & 7
-			v := m.R[r] - 1
-			m.R[r] = v
-			if v != 0 {
-				m.R[7] -= ir & 0o77 << 1
-			}
-		case 0:
-			m.mul(ir)
-		case 1:
-			m.div(ir)
-		case 2:
-			m.ash(ir)
-		case 3:
-			m.ashc(ir)
-		case 4:
-			m.xor(ir)
-		default: // the floating instruction set and the commercial one
-			m.traps |= trapReserved
-		}
-
-	default: // the floating point processor's
-		m.traps |= trapReserved
-	}
 }
 
 // control is the instructions that have no operand.
