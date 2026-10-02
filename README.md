@@ -19,7 +19,7 @@ with its own compiler and runs it, on the board as in SimH.
 
 ```
 $ ogo run
-303004 instructions in 2514 ms, 120526 a second
+303004 instructions in 2335 ms, 129766 a second
 60 cycles of the line clock in 988 ms
 
 PDP-11/40 on a Propeller 2, in OctoGo
@@ -115,7 +115,7 @@ go install modernc.org/ogo@v0.47.1
 
 ```sh
 ogo run                                  # build, load, and open a terminal
-ogo build --unchecked --clock 200MHz     # as fast as it goes: 171,673 a second
+ogo build --unchecked --clock 200MHz     # as fast as it goes: 181,005 a second
 ogo test ./...                           # the tests, on the board
 scripts/twin.sh                          # the packages' tests under Go, no board needed
 scripts/talk.py                          # a talk with RT-11 on the pack, on the board and in SimH

@@ -651,12 +651,20 @@ func (m *Machine) double(ir, size uint16) {
 
 	// The operands. A source in memory is fetched before the destination is
 	// decoded. A source in a register is read after, so that MOV R0,(R0)+
-	// stores what the register holds once it has stepped.
+	// stores what the register holds once it has stepped. A source that is
+	// the word after the instruction, #n, which a third of sources are, is
+	// found where it stands rather than through address: the PC is stepped
+	// before the read, as address steps it and as the real machine does.
 	var src, a, v uint16
 	if s >= 8 {
-		a = m.address(s, size)
-		if m.traps&aborts != 0 {
-			return
+		if s == 0o27 {
+			a = m.R[7]
+			m.R[7] = a + 2
+		} else {
+			a = m.address(s, size)
+			if m.traps&aborts != 0 {
+				return
+			}
 		}
 		src = m.read(a, size, dati)
 		if m.traps&aborts != 0 {

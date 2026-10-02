@@ -189,7 +189,16 @@ dispatch moved from `execute`, a function of its own, into `Run`:
 `execute` was called for every instruction, 155 clocks, and found SOB, a tenth
 of what Unix V6 executes, after fifteen comparisons, each a taken jump. The
 benchmark went from 104,089 to 120,526 instructions a second checked, and from
-118,360 to 137,292 unchecked. An instruction now costs `Run`'s loop, about 350
+118,360 to 137,292 unchecked, and the talk with Unix V6 from 95 s to 88.
+
+An immediate operand, `#n`, is a third of what V6 and RT-11 read. Found in
+`double` where it stands, without the call of `address`, `MOV #1,R2` costs
+1271 clocks where it cost 1529. Written first as a case of a `switch` before
+`s >= 8`, it put 24 clocks on every other two-operand instruction, the test of
+the mode being a taken jump for what fails it; nested inside `if s >= 8`, 6 on
+one with a source in a register and 22 to 30 on one with a source in memory.
+A test added to a path is a taken jump for everything that fails it, and the
+backend predicates only a short body. An instruction now costs `Run`'s loop, about 350
 clocks, a call of its function, 155 for `double` and `single` and 40 for the
 leaf `branch`, and its body; an operand in memory costs the calls of `address`
 and `read`, 680 in all, and one written back `write` as well, 1800 for
@@ -214,16 +223,22 @@ What else was tried, with the C the compiler emits kept and given back to it:
 - `read`, `address` and `write` marked with the attribute `ogo` marks a small
   function with, `__attribute__((inline))`: the backend left them as they were.
 
-Checked, the emulator is 14% slower than unchecked, 120,526 against 137,292:
-the receiver `m` is tested for nil at every access to a field of it, four
+Checked, the emulator was 14% slower than unchecked, 120,526 against 137,292:
+the receiver `m` was tested for nil at every access to a field of it, four
 instructions a time and twelve of them on `Run`'s path to an instruction, and
-`m.R[ir>>6&7]` is bounds-checked though the index is three bits. And every
-operation on a `uint16` is followed by a `getword` that keeps it one, 94 of
-them in `double`, two clocks each.
+`m.R[ir>>6&7]` was bounds-checked though the index is three bits. And every
+operation on a `uint16` was followed by a `getword` that keeps it one, 94 of
+them in `double`, two clocks each. The compiler of that evening,
+v0.47.2-0.20261002211137-ad6edefafc2b, writes narrow unsigned arithmetic with
+fewer conversions, 79 `getword` in `double`, and leaves out of a checked build
+the checks the program proves, ten tests of `m` on `Run`'s path: the same code
+runs 128,883 a second checked and 143,399 unchecked with it, 7% and 4% more,
+and the two are 11% apart.
 
-**Meanwhile:** the dispatch is in `Run`, what comes most often first, and the
-rest stays as it is: what is left to gain is in the backend's hands, a call
-that saves less, a jump that costs less, and the LUT.
+**Meanwhile:** the dispatch is in `Run`, what comes most often first, an
+immediate operand is found where it stands, and the rest stays as it is: what
+is left to gain is in the backend's hands, a call that saves less, a jump that
+costs less, and the LUT.
 
 ## Found here and closed
 
