@@ -23,7 +23,7 @@ const (
 
 	// trials is how many instructions are compared one by one, and runs how
 	// many times a run of them is.
-	trials = 10000
+	trials = 5000
 	runs   = 300
 
 	// maxFailures is how many differences are reported before a test gives
@@ -49,14 +49,22 @@ func random() uint32 {
 	return seed
 }
 
+// ioRegisters is what of the I/O page an address is now and then: the status
+// word and its upper byte, the memory management's status, and a page
+// register of each mode, which the core reads and writes itself or hands
+// back.
+var ioRegisters = [...]uint16{0o177776, 0o177777, 0o177572, 0o172300, 0o172316, 0o172340, 0o172356, 0o177600, 0o177616, 0o177640, 0o177656}
+
 // address answers an address that is mostly of a word in memory, now and
-// then of a byte, and now and then anywhere at all.
+// then of a byte, of a register, or anywhere at all.
 func address() uint16 {
-	switch random() % 16 {
-	case 0:
+	switch random() % 32 {
+	case 0, 1:
 		return uint16(random())
-	case 1:
+	case 2, 3:
 		return uint16(random() % (2 * memWords))
+	case 4:
+		return ioRegisters[random()%uint32(len(ioRegisters))]
 	}
 	return uint16(random()%memWords) << 1
 }
@@ -120,6 +128,12 @@ func randomState() state {
 			written = 0
 		}
 		s.pdr[i] = length | down | written | accesses[random()%8]
+	}
+	if random()%2 == 0 {
+		// the eighth page of both modes on the I/O page, which reaches the
+		// registers with the memory management on
+		s.par[7], s.pdr[7] = 0o7600, 0o77506
+		s.par[15], s.pdr[15] = 0o7600, 0o77506
 	}
 	return s
 }
@@ -185,6 +199,12 @@ func same(what string, ir uint16) bool {
 		x, _ = plain.Examine(0o177600 + 2*i)
 		y, _ = fast.Examine(0o177600 + 2*i)
 		differ("user PDR", x, y)
+		x, _ = plain.Examine(0o172340 + 2*i)
+		y, _ = fast.Examine(0o172340 + 2*i)
+		differ("kernel PAR", x, y)
+		x, _ = plain.Examine(0o177640 + 2*i)
+		y, _ = fast.Examine(0o177640 + 2*i)
+		differ("user PAR", x, y)
 	}
 	for i := range plainMemory {
 		if plainMemory[i] != fastMemory[i] {

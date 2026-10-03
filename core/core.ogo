@@ -31,6 +31,9 @@ const (
 	mapped
 	memory
 	words
+	parAddress
+	pdrAddress
+	traps
 
 	blockSize
 )
@@ -98,6 +101,9 @@ func Attach(m *pdp11.Machine) bool {
 	block[mapped] = uint32(p.Mapped)
 	block[memory] = uint32(p.Memory)
 	block[words] = p.Words
+	block[parAddress] = uint32(p.PAR)
+	block[pdrAddress] = uint32(p.PDR)
+	block[traps] = uint32(p.Traps)
 	bind()
 	m.Accelerate(&core)
 	return true

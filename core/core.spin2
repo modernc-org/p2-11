@@ -19,10 +19,20 @@
 ' RESET, RTI, RTT, BPT, IOT, EMT, TRAP, MARK, MUL, DIV, ASH, ASHC, the
 ' reserved and the floating point instructions, a JMP or JSR to a register,
 ' JSR SP, and MFPI and MTPI of the other mode's stack pointer. It hands back
-' an instruction that would touch the I/O page or memory that is not there,
-' read or write a word at an odd address, find an access the memory
-' management does not admit, write first to a page, or leave the kernel's
-' stack below 400: in each the machine traps, or does what only it does.
+' an instruction that would touch memory that is not there or the I/O page,
+' but for the status word and a word of a page register, read or write a
+' word at an odd address, find an access the memory management does not
+' admit, write first to a page, leave the kernel's stack below 400, write a
+' byte of the status word or change the mode with a word, or push onto the
+' I/O page: in each the machine traps, or does what only it does.
+'
+' The status word and the page registers the core reads and writes where the
+' machine keeps them, as the machine does: a write to the status word leaves
+' its trace bit alone, and one that lowers the priority ends the batch with
+' attention requested, for the devices to be asked at once; a write to a page
+' register works out again what the page comes to, in the machine and in the
+' LUT. Their code is in hub RAM, which executes them slower than a cog would,
+' and they are a few in a hundred of what a program executes.
 '
 ' Until an instruction is sure to complete it changes nothing but the
 ' registers its operands step, and those it notes, so that a hand-back can
@@ -37,7 +47,7 @@ CON
   COMMAND  = 0                  ' the block: what the core is to do,
   EXECUTED = 1                  ' how many instructions it executed,
   PLACE    = 2                  ' and from here where the machine is
-  PLACES   = 8                  ' in so many longs
+  PLACES   = 11                 ' in so many longs
 
   RELOAD   = $8000_0000         ' the command to read the places again
 
@@ -116,10 +126,11 @@ entry           mov     blk, ptra
                 add     t, ##@lutcode - @entry
                 setq2   #lutend - lutcode - 1
                 rdlong  0, t
+                call    #\hubinit
 idle            rdlong  cmd, blk        wz
         if_z    jmp     #idle
                 testb   cmd, #31        wc
-        if_c    jmp     #\rebind
+        if_c    jmp     rebindx
 
 ' A batch: cmd instructions at the most, from where the program counter is.
                 mov     left, cmd
@@ -346,8 +357,11 @@ dwrite          cmp     dspec, #8       wc
                 mov     0-0, r
                 jmp     #retire
 
-' wmem writes r where ha is, a word or a byte as sbit says.
-wmem            cmp     sbit, #15       wz
+' wmem writes r where ha is, a word or a byte as sbit says, or to the
+' register there if the access was to one.
+wmem            cmp     iokind, #0      wz
+        if_nz   jmp     iowritex
+                cmp     sbit, #15       wz
         if_z    wrword  r, ha
         if_nz   wrbyte  r, ha
                 jmp     #retire
@@ -458,8 +472,9 @@ remember        altd    ulog, #ureg
         _ret_   add     ulog, #1
 
 ' rd answers in val the operand at va, a word or a byte as sbit says, for the
-' access cyc, and ha where it is.
-rd              cmp     sbit, #15       wz
+' access cyc, and ha where it is; iokind says whether it is a register.
+rd              mov     iokind, #0
+                cmp     sbit, #15       wz
         if_nz   jmp     #.byte
                 testb   va, #0          wc
         if_c    jmp     #handback
@@ -469,8 +484,9 @@ rd              cmp     sbit, #15       wz
         _ret_   rdbyte  val, ha
 
 ' locate answers in ha where the operand at va is, for the access cyc,
-' without reading it.
-locate          cmp     sbit, #15       wz
+' without reading it, and in iokind whether it is a register.
+locate          mov     iokind, #0
+                cmp     sbit, #15       wz
         if_nz   jmp     xlate
                 testb   va, #0          wc
         if_c    jmp     #handback
@@ -482,7 +498,7 @@ xoff            mov     ha, va
                 add     ha, membase
                 cmp     ha, limit0      wc
         if_c    ret
-                jmp     #handback
+                jmp     iooffx          ' the I/O page, or nothing
 
 ' xon does the same with the memory management on, for the access cyc, in the
 ' pages at tab in the LUT.
@@ -512,39 +528,9 @@ xon             mov     pg, va
                 add     ha, membase
                 cmp     ha, limit1      wc
         if_c    ret
-                jmp     #handback       ' the I/O page, or past memory
+                jmp     ioonx           ' the I/O page, or past memory
 
 ' ---- Helpers of the instructions in the LUT.
-
-' words sets the sizes for a word, and wspec answers in spec the operand of
-' the instruction's lower six bits, with C set if it is a register.
-wspec           call    #words
-                mov     spec, ir
-                and     spec, #$3F
-        _ret_   cmp     spec, #8        wc
-words           mov     mask, wmask
-                mov     sbit, #15
-                mov     signv, wsign
-        _ret_   mov     stp, #2
-
-' previous has the next access go through the previous mode's pages, keeping
-' the current mode's in tsave, and hands the instruction back if the previous
-' mode is none of the 11/40's.
-previous        cmp     ptab, #0        wz
-        if_z    jmp     #handback
-                mov     tsave, tab
-        _ret_   mov     tab, ptab
-
-' samemode hands the instruction back unless the previous mode is the
-' current one, whose stack pointer is R6.
-samemode        mov     t, psw
-                shr     t, #12
-                mov     t1, t
-                shr     t1, #2
-                and     t, #3
-                cmp     t, t1           wz
-        if_z    ret
-                jmp     #handback
 
 ' pushw answers in va and ha where a word pushed onto the current stack goes,
 ' and hands the instruction back if the kernel's stack would go below its
@@ -595,6 +581,9 @@ pagesaddr       long    0
 mappedaddr      long    0
 membase         long    0
 memwords        long    0
+paraddr         long    0
+pdraddr         long    0
+trapsaddr       long    0
 
 doneaddr        long    0
 limit0          long    0
@@ -605,6 +594,15 @@ fetchx          long    foff
 wmask           long    $FFFF
 hmask           long    $FF00
 wsign           long    $8000
+parbits         long    $0FFF
+pdrbits         long    $7F0E
+pagemax         long    $1FFF
+
+' Where in hub RAM the code is that the core executes from there.
+iooffx          long    0
+ioonx           long    0
+iowritex        long    0
+rebindx         long    0
 
 ' The PDP-11's registers while a batch runs.
 r0              long    0
@@ -663,6 +661,12 @@ t1              res     1
 t2              res     1
 t3              res     1
 tsave           res     1
+t4              res     1
+t5              res     1
+iokind          res     1
+ioa             res     1
+iomode          res     1
+psw0            res     1
 tp              res     1
 rr01            res     1
 rr23            res     1
@@ -678,7 +682,7 @@ lutcode
 ' ---- The one-operand instructions, 005000 to 006377 of words and 105000 to
 ' 106377 of bytes.
 
-sopw            call    #\words
+sopw            call    #words
                 jmp     #sop
 sopb            mov     mask, #$FF
                 mov     sbit, #7
@@ -811,6 +815,36 @@ swrite          cmp     op, #7          wz
         if_z    jmp     #\retire
                 jmp     #\dwrite
 
+' words sets the sizes for a word, and wspec answers in spec the operand of
+' the instruction's lower six bits, with C set if it is a register.
+wspec           call    #words
+                mov     spec, ir
+                and     spec, #$3F
+        _ret_   cmp     spec, #8        wc
+words           mov     mask, wmask
+                mov     sbit, #15
+                mov     signv, wsign
+        _ret_   mov     stp, #2
+
+' previous has the next access go through the previous mode's pages, keeping
+' the current mode's in tsave, and hands the instruction back if the previous
+' mode is none of the 11/40's.
+previous        cmp     ptab, #0        wz
+        if_z    jmp     #\handback
+                mov     tsave, tab
+        _ret_   mov     tab, ptab
+
+' samemode hands the instruction back unless the previous mode is the
+' current one, whose stack pointer is R6.
+samemode        mov     t, psw
+                shr     t, #12
+                mov     t1, t
+                shr     t1, #2
+                and     t, #3
+                cmp     t, t1           wz
+        if_z    ret
+                jmp     #\handback
+
 ' ---- The branches, 000400 to 003777 and 100000 to 103777. Whether one is
 ' taken is a bit of brtab: the branch's four bits, its upper three and the
 ' instruction's sign, and the condition codes' four.
@@ -876,7 +910,7 @@ xor_            call    #wrmw
 
 ' wrmw answers in v the word the destination of the instruction holds, which
 ' it will write back, and in dspec which it is.
-wrmw            call    #\wspec
+wrmw            call    #wspec
                 mov     dspec, spec
         if_nc   jmp     #.memory
                 alts    dspec, #r0
@@ -940,7 +974,7 @@ g0002           cmp     ir, #$88        wc      ' 000210
                 jmp     #\retire
 
 ' JMP dst. To a register it traps.
-jmp_            call    #\wspec
+jmp_            call    #wspec
         if_c    jmp     #\handback
                 call    #\ea
                 mov     r7, va
@@ -948,7 +982,7 @@ jmp_            call    #\wspec
 
 ' JSR R,dst: the register onto the stack, the return address into the
 ' register, and on at the destination.
-jsr_            call    #\wspec
+jsr_            call    #wspec
         if_c    jmp     #\handback      ' to a register it traps
                 mov     lnk, ir
                 shr     lnk, #6
@@ -958,6 +992,8 @@ jsr_            call    #\wspec
                 call    #\ea
                 mov     tgt, va
                 call    #\pushw
+                cmp     iokind, #0      wz
+        if_nz   jmp     #\handback      ' a push onto a register
                 alts    lnk, #r0
                 mov     t, 0-0
                 wrword  t, ha
@@ -972,7 +1008,7 @@ jsr_            call    #\wspec
 rts_            mov     lnk, ir
                 and     lnk, #7
                 mov     va, r6
-                call    #\words
+                call    #words
                 mov     cyc, #DATI
                 call    #\rd
                 alts    lnk, #r0
@@ -1000,7 +1036,7 @@ swab_           call    #wrmw
                 jmp     #\dwrite
 
 ' SXT dst: the destination all ones if N is set, all zeros if not.
-sxt_            call    #\wspec
+sxt_            call    #wspec
                 mov     dspec, spec
         if_c    jmp     #.op
                 call    #\ea
@@ -1018,20 +1054,22 @@ sxt_            call    #\wspec
 ' address is found in the current space, and it is read in the previous one;
 ' a register is the current mode's, but for the previous mode's own stack
 ' pointer, which is the machine's.
-mfpi            call    #\wspec
+mfpi            call    #wspec
         if_nc   jmp     #.memory
                 cmp     spec, #6        wz
-        if_z    call    #\samemode
+        if_z    call    #samemode
                 alts    spec, #r0
                 mov     v, 0-0
                 jmp     #.push
 .memory         call    #\ea
-                call    #\previous
+                call    #previous
                 mov     cyc, #DATI
                 call    #\rd
                 mov     tab, tsave
                 mov     v, val
 .push           call    #\pushw
+                cmp     iokind, #0      wz
+        if_nz   jmp     #\handback
                 mov     r, v
                 call    #\setnz
                 mov     r6, va
@@ -1040,7 +1078,7 @@ mfpi            call    #\wspec
 
 ' MTPI dst: a word off the current stack into the previous mode's space. The
 ' stack pointer is stepped before the destination is decoded.
-mtpi            call    #\words
+mtpi            call    #words
                 mov     va, r6
                 mov     cyc, #DATI
                 call    #\rd
@@ -1054,7 +1092,7 @@ mtpi            call    #\words
                 cmp     dspec, #8       wc
         if_nc   jmp     #.memory
                 cmp     dspec, #6       wz
-        if_z    call    #\samemode
+        if_z    call    #samemode
                 mov     r, v
                 call    #\setnz
                 altd    dspec, #r0
@@ -1062,9 +1100,11 @@ mtpi            call    #\words
                 jmp     #\retire
 .memory         mov     spec, dspec
                 call    #\ea
-                call    #\previous
+                call    #previous
                 mov     cyc, #DATO
                 call    #\locate
+                cmp     iokind, #0      wz
+        if_nz   jmp     #\handback      ' a register of the previous mode
                 mov     tab, tsave
                 mov     r, v
                 call    #\setnz
@@ -1173,6 +1213,184 @@ remap           mov     gen, t
                 setq2   #MODEPAGES / 4 - 1
         _ret_   rdlong  UTAB, t1
 
+' hubinit works out where in hub RAM the code is that the core executes from
+' there, from where coginit started the core.
+hubinit         mov     iooffx, ptrb
+                add     iooffx, ##@iooff - @entry
+                mov     ioonx, ptrb
+                add     ioonx, ##@ioon - @entry
+                mov     iowritex, ptrb
+                add     iowritex, ##@iowrite - @entry
+                mov     rebindx, ptrb
+                add     rebindx, ##@rebind - @entry
+                ret
+
+lutend
+                fit     $200 + KTAB
+
+' ---- What the core executes from hub RAM: the registers of the I/O page it
+' keeps, which are rare, and its binding, which is rarer. Its entries are
+' reached through the registers hubinit sets, so that where in hub RAM it is
+' matters not, and within it a jump is relative.
+
+                orgh
+
+' iooff: with the memory management off, va is past memory: a register of the
+' I/O page, or where nothing answers.
+iooff           cmp     va, ##IOPAGE    wc
+        if_c    jmp     #\handback
+                mov     ioa, va
+                jmp     #ioreg
+
+' ioon: with it on, ha is past memory: where nothing answers, past the end of
+' the bus, which the machine wraps, or a register of the I/O page at its top.
+ioon            mov     ioa, ha
+                sub     ioa, membase
+                cmp     ioa, ##IOBASE   wc
+        if_c    jmp     #\handback
+                cmp     ioa, ##$4_0000  wc
+        if_nc   jmp     #\handback
+                sub     ioa, ##IOBASE - IOPAGE
+
+' ioreg answers in ha where the machine keeps the register at ioa, if it is
+' the status word or a word of a page register, noting which in iokind, and
+' hands the instruction back if it is any other. The status word is the
+' core's while a batch runs, so it goes where the machine keeps it first.
+ioreg           mov     t1, ioa
+                andn    t1, #1
+                cmp     t1, ##$FFFE     wz
+        if_nz   jmp     #.pages
+                mov     psw0, psw
+                wrword  psw, pswaddr
+                mov     ha, pswaddr
+                testb   ioa, #0         wc
+        if_c    add     ha, #1
+                mov     iokind, #1
+                ret
+.pages          cmp     sbit, #15       wz
+        if_nz   jmp     #\handback      ' a byte of a page register
+                mov     iomode, #0
+                mov     t1, ioa
+                andn    t1, #$3F
+                cmp     t1, ##$F4C0     wz      ' 172300 to 172377, the kernel's
+        if_z    jmp     #.page
+                mov     iomode, #3
+                cmp     t1, ##$FF80     wz      ' 177600 to 177677, the user's
+        if_nz   jmp     #\handback
+.page           mov     ha, ioa
+                and     ha, #$E                 ' the page's register, by two bytes,
+                mov     t1, iomode
+                shl     t1, #4
+                add     ha, t1                  ' in the mode's sixteen
+                testb   ioa, #5         wc      ' an address register, or a descriptor
+        if_c    add     ha, paraddr
+        if_nc   add     ha, pdraddr
+                mov     iokind, #2
+                ret
+
+' iowrite writes r to the register ioreg found, as the machine writes it.
+' The status word takes a word but for its trace bit, which only a trap and
+' a return from one change; a byte of it, and a word that changes the mode,
+' are the machine's, as the instruction is from where it began. A priority
+' lowered ends the batch with attention requested, for Run to ask the
+' devices before the next instruction.
+iowrite         cmp     iokind, #2      wz
+        if_z    jmp     #pagew
+                cmp     sbit, #15       wz
+        if_nz   jmp     #.back
+                mov     t1, r
+                andn    t1, #$10
+                mov     t2, psw
+                and     t2, #$10
+                or      t1, t2
+                and     t1, ##$F0FF             ' what a status word holds
+                mov     t2, t1
+                xor     t2, psw0
+                shr     t2, #12         wz      ' the mode changes
+        if_nz   jmp     #.back
+                mov     t2, t1
+                and     t2, #$E0
+                mov     t3, psw0
+                and     t3, #$E0
+                cmp     t2, t3          wc      ' the priority comes down
+                mov     psw, t1
+        if_nc   jmp     #\retire
+                rdword  t2, trapsaddr
+                or      t2, ##$8000
+                wrword  t2, trapsaddr
+                mov     left, #1
+                jmp     #\retire
+.back           mov     psw, psw0
+                jmp     #\handback
+
+' pagew writes r to a page register: the register keeps what of it it keeps,
+' the page's descriptor forgets that the page was written to, and what the
+' page comes to is worked out again, as mapPage does, where the machine keeps
+' it and in the LUT. The machine counts the change, and the core's own count
+' follows it if the LUT was the machine's before.
+pagew           mov     t1, ioa
+                and     t1, #$E
+                mov     t2, iomode
+                shl     t2, #4
+                add     t1, t2                  ' the page's registers, by bytes
+                testb   ioa, #5         wc      ' an address register
+        if_c    and     r, parbits
+        if_nc   and     r, pdrbits
+                wrword  r, ha
+                mov     t2, t1
+                add     t2, pdraddr
+                rdword  t3, t2                  ' the descriptor
+                andn    t3, #$40                ' forgets that the page was written to
+                wrword  t3, t2
+                add     t1, paraddr
+                rdword  t1, t1                  ' the address register
+                shl     t1, #6                  ' where the page begins on the bus
+                mov     t2, t3
+                and     t2, ##$7F00
+                shr     t2, #2                  ' the last block within its length
+                testb   t3, #3          wc      ' the page grows down
+        if_c    mov     t4, t2                  ' from the length to the end,
+        if_c    mov     t5, pagemax
+        if_nc   mov     t4, #0                  ' or from the beginning to it
+        if_nc   mov     t5, t2
+        if_nc   or      t5, #$3F
+                shl     t5, #16
+                or      t4, t5                  ' the least offset and the greatest
+                shr     t3, #1
+                and     t3, #3                  ' 2 read only, 6 read and write
+                testb   t3, #0          wc
+        if_nc   mov     t3, #0                  ' and anything else nothing
+                mov     t2, iomode
+                shl     t2, #3
+                mov     t5, ioa
+                shr     t5, #1
+                and     t5, #7                  ' the page
+                add     t2, t5
+                mul     t2, #PAGESIZE
+                add     t2, pagesaddr
+                wrlong  t1, t2
+                add     t2, #4
+                wrlong  t4, t2
+                add     t2, #4
+                wrword  t3, t2
+                mov     t2, t5
+                mul     t2, #3
+                cmp     iomode, #0      wz
+        if_z    add     t2, #KTAB
+        if_nz   add     t2, #UTAB
+                wrlut   t1, t2
+                add     t2, #1
+                wrlut   t4, t2
+                add     t2, #1
+                wrlut   t3, t2
+                rdlong  t1, mappedaddr
+                cmp     t1, gen         wz
+                add     t1, #1
+                wrlong  t1, mappedaddr
+        if_z    mov     gen, t1
+                mov     cpage, #8               ' the program may be in the page
+                jmp     #\retire
+
 ' rebind reads where the machine keeps its state from the block, and works out
 ' where in hub RAM memory ends for each way of reaching it: below the I/O page
 ' with the memory management off, and below the I/O page of the bus with it
@@ -1194,5 +1412,3 @@ rebind          mov     t, blk
                 neg     gen, #1         ' no pages read yet
                 wrlong  #0, blk
                 jmp     #\idle
-lutend
-                fit     $200 + KTAB
