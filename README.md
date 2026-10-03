@@ -21,7 +21,7 @@ The instructions a program mostly executes are executed by a core in the
 Propeller's own assembly, on a cog of its own, which OctoGo carries as a Spin2
 object: [core](core). It makes the machine five times as fast as its OctoGo
 alone, and about one and a half times as fast as an 11/40 was. What the core
-leaves, the I/O page, traps and interrupts and the rarer instructions, is the
+leaves, the devices, traps and interrupts and the rarer instructions, is the
 OctoGo machine's, which is also what the core is tested against, instruction
 by instruction.
 

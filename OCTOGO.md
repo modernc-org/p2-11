@@ -282,6 +282,13 @@ What it took, besides the PASM:
   a label and a method, `BIND` as a constant beside the method, `place` as a
   label beside a constant `PLACE`, `reg` and `next` as labels, each failed.
   ogo 8f5eb43 writes that down in "Functions implemented in Spin2".
+- When the cog and the LUT were full, what is rare went to hub RAM: an
+  `orgh` section of the object's DAT, which a cog executes from hub, slower.
+  Its entries are reached through registers the core sets from PTRB at its
+  start, `@label - @entry` being where in the image a label is, so that where
+  the backend puts the image matters not, and within it every jump is
+  relative. Nothing of OctoGo's was needed for that either. The status word
+  and the page registers run there, and the core binding itself to a machine.
 - The host cannot build a package with a Spin2 object, so the twin leaves it
   out, and the core is tested on the board only: against the machine's own
   code on random instructions and random programs, and on pdp11's 2902
