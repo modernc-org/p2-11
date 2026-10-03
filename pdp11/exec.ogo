@@ -67,12 +67,15 @@ func (m *Machine) Run(n uint32) State {
 			// The core, if there is one, executes as many of the
 			// instructions as it will. One it leaves is the machine's.
 			// It is not given any while a trap is due, which the trace
-			// bit has requested if it is set.
+			// bit has requested if it is set. It may have written a page
+			// register, so the page the program is in is looked up
+			// again, and it may have asked for the devices to be asked.
 			if m.core != nil && m.traps == 0 {
 				done := m.core.Execute(left)
 				n -= done
 				left -= done
-				if left == 0 {
+				codePage = 8
+				if left == 0 || m.traps != 0 {
 					break
 				}
 			}
