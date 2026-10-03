@@ -65,7 +65,7 @@ scripts/twin.sh -run Vectors ./pdp11
 scripts/twin.sh -v -run RT11 ./rk11 # the talk with RT-11, if guest/RK0.DSK and SimH are there
 scripts/talk.py                    # the same talk on the board and in SimH, half a minute
 scripts/talk.py -talk v6           # the talk with Unix V6, its pack being on the card, a minute and a half
-scripts/record.py                  # a session with V6 on the board, as v6-demo.cast for the README's GIF, two minutes
+scripts/record.py                  # a session with V6 on the board, as v6-demo.cast for the README's GIF, a minute
 scripts/card.py put guest/RK0.DSK RK0.DSK   # the pack onto the card through the board, two minutes
 scripts/card.py put guest/UNIX0.DSK RK0.DSK # the root pack of Unix V6 there instead
 scripts/card.py sum RK0.DSK guest/RK0.DSK   # which blocks of the pack on the card differ from the file, 15 s
@@ -102,7 +102,7 @@ Bytes written into that pipe before the `\x1d` reach the program as console inpu
 | `mac/disk_table.ogo` | `scripts/rk.py` | SimH running `mac/disk.mac` with two packs the script makes, a second |
 | `vga/font.ogo` | `scripts/font.py` | `tools/unscii-16.hex`, Unscii 2.1's font of 8 by 16, public domain, and seven glyphs the script draws |
 | `logo.svg` | `scripts/logo.py` | nothing: the name drawn as strokes, its ones the toggle switches of a front panel |
-| `v6-demo.gif` | `scripts/record.py`, then `agg --idle-time-limit 120 --last-frame-duration 5 v6-demo.cast v6-demo.gif`, then `scripts/poster.py v6-demo.gif`, which puts the last frame first, held 3 s, since what does not play a GIF shows its first frame, and a session's first is an empty terminal | a session with Unix V6 on the board, its root pack on the card, two minutes |
+| `v6-demo.gif` | `scripts/record.py`, then `agg --idle-time-limit 120 --last-frame-duration 5 v6-demo.cast v6-demo.gif`, then `scripts/poster.py v6-demo.gif`, which puts the last frame first, held 3 s, since what does not play a GIF shows its first frame, and a session's first is an empty terminal | a session with Unix V6 on the board, its root pack on the card, a minute; made again on 2026-10-03 with the core and `ogo` v0.48.0, 45 s where it was 95 |
 
 `scripts/tools.sh` fetches and builds SimH and the macro11 assembler into `tools/`, which git ignores, each at the revision the repository's files were made with, and fetches the font `scripts/font.py` reads, checked by its sum. Nothing needs them but these four scripts. Made again with the same tools and arguments, the files come out as they are. The recording is the exception: made again, it has the timing of its own session; and agg, asciinema's converter, is not among the tools, nor asciinema, which plays the `.cast`. `scripts/poster.py` wants Pillow and numpy, and checks that every frame it writes is the frame it read: Pillow's `quantize` comes near a colour, not to it.
 

@@ -74,9 +74,10 @@ the 11/45's and halt it. `root` logs in with no password.
 
 ![Unix V6 booting on the board and compiling hello, world, at real speed](v6-demo.gif)
 
-That is the board, recorded at real speed: 95 seconds from `ogo run` to the
-last `sync`, the first twelve of them the build, the load and the emulator
-timing itself. [scripts/record.py](scripts/record.py) makes the recording.
+That is the board, recorded at real speed: 45 seconds from `ogo run` to the
+last `sync`, the first eight and a half of them the build, the load and the
+emulator timing itself. [scripts/record.py](scripts/record.py) makes the
+recording.
 
 | | |
 | --- | --- |
