@@ -3,7 +3,17 @@
 A handoff from the ogo session of 2026-10-03, written at the user's request, for
 the p2-11 session to read before deciding anything. It records an idea discussed
 with the user, the facts behind it, and a plan to test it in steps that each end
-in a measurement. Nothing here has been built. A number marked **measured** was
+in a measurement.
+
+**Built the same day**, as architecture A, the package `core`, aimed at about
+an 11/40's speed: `mac/bench.mac` runs five times as fast with it, one and a
+half times an 11/40. Where it differs from what follows: the core works on the
+machine's own fields in hub RAM, so a synchronisation copies nothing; the
+handshake is PASM in the object's methods; PS and the page registers are handed
+back, which leaves 5.8% of V6's instructions to the machine and not 1.8%; and
+with a core the devices are asked every 256 instructions. CLAUDE.md, "The
+core", has it as it is; what follows is the plan as it was, and was not
+built in all of its parts. A number marked **measured** was
 measured on a P2 board; one marked **estimate** is arithmetic from measured
 instruction timings and has not been measured.
 

@@ -17,9 +17,17 @@ management are there, with 248 KB of memory, and two systems run from a pack
 on the SD card: RT-11 V4, and Unix V6, which logs in, compiles a C program
 with its own compiler and runs it, on the board as in SimH.
 
+The instructions a program mostly executes are executed by a core in the
+Propeller's own assembly, on a cog of its own, which OctoGo carries as a Spin2
+object: [core](core). It makes the machine five times as fast as its OctoGo
+alone, and about one and a half times as fast as an 11/40 was. What the core
+leaves, the I/O page, traps and interrupts and the rarer instructions, is the
+OctoGo machine's, which is also what the core is tested against, instruction
+by instruction.
+
 ```
 $ ogo run
-303004 instructions in 2335 ms, 129766 a second
+303004 instructions in 401 ms, 755620 a second
 60 cycles of the line clock in 988 ms
 
 PDP-11/40 on a Propeller 2, in OctoGo
@@ -115,7 +123,7 @@ go install modernc.org/ogo@v0.47.1
 
 ```sh
 ogo run                                  # build, load, and open a terminal
-ogo build --unchecked --clock 200MHz     # as fast as it goes: 181,005 a second
+ogo build --unchecked --clock 200MHz     # as fast as it goes: 952,842 a second
 ogo test ./...                           # the tests, on the board
 scripts/twin.sh                          # the packages' tests under Go, no board needed
 scripts/talk.py                          # a talk with RT-11 on the pack, on the board and in SimH
@@ -127,8 +135,9 @@ scripts/card.py put RK0.DSK RK0.DSK      # a pack onto the card, through the boa
 
 | | |
 | --- | --- |
-| [main.ogo](main.ogo), [disk.ogo](disk.ogo) | the program: five cogs, one stepping the machine, one reading the serial line, one writing it, one counting the cycles of the line clock, one moving blocks between the card and memory |
+| [main.ogo](main.ogo), [disk.ogo](disk.ogo) | the program: six cogs, one stepping the machine, one executing what it can of its instructions, one reading the serial line, one writing it, one counting the cycles of the line clock, one moving blocks between the card and memory |
 | [pdp11](pdp11) | the machine: processor, memory, bus, traps and interrupts |
+| [core](core) | its common instructions in PASM, on a cog of their own |
 | [dl11](dl11) | the console |
 | [kw11](kw11) | the line clock |
 | [rk11](rk11) | the disk controller and its drives |

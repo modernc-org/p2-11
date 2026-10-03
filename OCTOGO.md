@@ -26,7 +26,9 @@ its hot path having no small function left to inline. 3 is what a profile of
 the emulator found on 2026-10-02, with `ogo`
 v0.47.2-0.20261002103426-b80a9c3f7bab+dirty, of where the clocks go in code
 that runs from hub memory, as the emulator's does: into the saving of a
-function's registers at every call, and into jumps.
+function's registers at every call, and into jumps. 4 is what the emulator
+does about all three since 2026-10-03: its hot loop is PASM, which OctoGo
+carries as a Spin2 object.
 
 ## 1. A call is dear, and a function with a branch in it was called
 
@@ -238,12 +240,58 @@ and the two are 11% apart.
 **Meanwhile:** the dispatch is in `Run`, what comes most often first, an
 immediate operand is found where it stands, and the rest stays as it is: what
 is left to gain is in the backend's hands, a call that saves less, a jump that
-costs less, and the LUT.
+costs less, and the LUT. Since 2026-10-03 the instructions a program mostly
+executes are the core's, in PASM, which 4 tells of, and these costs are what
+the machine's own code pays for the rest.
+
+## 4. The hot loop is PASM, which OctoGo carries as a Spin2 object
+
+What 3 measured is what C becomes on this backend, and no rewriting of the
+emulator in OctoGo gets near an 11/40's speed from there. So since 2026-10-03
+the instructions a program mostly executes are executed by a core in PASM,
+`core/core.spin2`, on a cog of its own, which the package `core` carries as
+`vga` carries its driver: functions without bodies, `start`, `execute`, `bind`
+and `stop`, bind the object's PUB methods, and the program hands the object
+the addresses it works on. Nothing new was needed of OctoGo for it.
+
+It makes the machine five times as fast: `mac/bench.mac` runs 761,316
+instructions a second where the machine alone runs 137,979, `MOV R1,R2` costs
+167 clocks where it cost 880, `ADD R2,(R1)+` 389 where 2684, a taken `SOB` 115
+where 496. What the core leaves to the machine, the I/O page, traps and the
+rarer instructions, costs what it did and 710 clocks more for the hand-back.
+
+What it took, besides the PASM:
+
+- The machine's state is the core's where the machine keeps it, so nothing is
+  copied: `pdp11.Machine.Places` makes numbers of the addresses of its fields
+  with `unsafe.Pointer`, and of the layout of a page, which is the backend's
+  to choose; `core.Attach` refuses a layout the core is not written for.
+- The handshake is PASM too, in the object's PUB methods: the program writes a
+  command into a long and waits for the core to clear it, in a loop of the
+  method's inline assembly, so that no OctoGo loop polls a word another cog
+  writes. OctoGo's rule for that, which ogo c789abd wrote down on the same
+  day, is among what is closed below.
+- A cog holds 496 longs and its LUT 512, and the core is about 930: its
+  registers, tables and most of its code in the cog, the rest of its code and
+  the pages of the memory management in the LUT, which the core loads itself
+  from where `coginit` started it, PTRB, as Eric Smith's driver loads its own.
+  A label past cog address $1FF is no register, which the compiler says where
+  the label is used, as "does not appear to be a register".
+- A Spin2 object's CON names, method names and DAT labels share one
+  namespace, without regard to case, and Spin2's keywords are in it: `bind` as
+  a label and a method, `BIND` as a constant beside the method, `place` as a
+  label beside a constant `PLACE`, `reg` and `next` as labels, each failed.
+  ogo 8f5eb43 writes that down in "Functions implemented in Spin2".
+- The host cannot build a package with a Spin2 object, so the twin leaves it
+  out, and the core is tested on the board only: against the machine's own
+  code on random instructions and random programs, and on pdp11's 2902
+  vectors of SimH's.
 
 ## Found here and closed
 
 | What | Closed by |
 | --- | --- |
+| Whether a cog that spins on a variable another cog writes sees the write was nowhere said, though the console's ring and the tests between cogs relied on it, and Go leaves a compiler free to keep the variable in a register. OctoGo's specs.go says it since, "Memory shared between cogs": a loop reads Hub RAM on every pass, a cog's writes reach it in program order, and a value of 32 bits or fewer is read and written whole; a test holds the backend's listing to it. | c789abd |
 | Assigning a call's several results to fields, `l.rx, l.request = control(l.rx, v, l.request)`, took the compiler 23 s in a program of twelve lines, and all the memory there was in a larger one. It had come in between 086cf7f and 43262bc. | ce72a9e |
 | An array literal was one line of C, and a table of 8000 numbers more than the backend's preprocessor takes in a line. | bad9e5a |
 | `ogo fmt` and gofmt disagreed about the names of a constant block of which only the first has a value, about `for i := 0; ; i++`, and about the second line of a call's arguments. | 35dda36 |
