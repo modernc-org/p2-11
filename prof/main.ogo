@@ -85,6 +85,10 @@ var shapes = [...]shape{
 	{"ASH #3,R2", [3]uint16{0o072227, 3}, 2, 1, false},
 	{"MOV R3,-(SP); MTPI (R1)+", [3]uint16{0o010346, 0o006621}, 2, 2, false},
 	{"MFPI (R1)+; MOV (SP)+,R3", [3]uint16{0o006521, 0o012603}, 2, 2, false},
+	{"MOV @#PS,R2", [3]uint16{0o013702, 0o177776}, 2, 1, false},
+	{"MOV R3,@#PS", [3]uint16{0o010337, 0o177776}, 2, 1, false},
+	{"MOV @#KPAR0,R2", [3]uint16{0o013702, 0o172340}, 2, 1, false},
+	{"MOV R3,@#KPAR6", [3]uint16{0o010337, 0o172354}, 2, 1, false},
 
 	{"unit on: INC R3", [3]uint16{0o005203}, 1, 1, true},
 	{"unit on: MOV R1,R2", [3]uint16{0o010102}, 1, 1, true},
