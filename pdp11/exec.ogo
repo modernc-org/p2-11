@@ -57,10 +57,26 @@ func (m *Machine) Run(n uint32) State {
 		// And then instructions, until one of them asks for that again or
 		// the devices have not been asked for long enough.
 		left := uint32(pollEvery)
+		if m.core != nil {
+			left = coreEvery
+		}
 		if left > n {
 			left = n
 		}
 		for {
+			// The core, if there is one, executes as many of the
+			// instructions as it will. One it leaves is the machine's.
+			// It is not given any while a trap is due, which the trace
+			// bit has requested if it is set.
+			if m.core != nil && m.traps == 0 {
+				done := m.core.Execute(left)
+				n -= done
+				left -= done
+				if left == 0 {
+					break
+				}
+			}
+
 			// The unit notes where the instruction is, unless an abort
 			// holds its registers. The instruction is fetched where it
 			// stands if it is in memory the processor reaches as it is, or

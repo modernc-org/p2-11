@@ -39,8 +39,12 @@ const (
 	// pollEvery is how many instructions run between two rounds of asking the
 	// devices whether they want an interrupt. A round is also made as soon as
 	// the program has touched a device or the status word, which is when the
-	// answer is most likely to have changed.
+	// answer is most likely to have changed. With a core the round is made
+	// every coreEvery instructions, which is about as often in time: a core
+	// executes an instruction in a tenth of the time or less, and a round
+	// costs what a few of the machine's own instructions do.
 	pollEvery = 32
+	coreEvery = 256
 
 	// stackLimit is where the 11/40's fixed stack limit is: a push that leaves
 	// the kernel's stack pointer below it traps once the instruction is over.
@@ -137,14 +141,17 @@ type Machine struct {
 	// through, which is the current mode's but for the moments an
 	// instruction reaches into the previous mode's space or a trap into the
 	// kernel's.
-	sr0   uint16
-	sr2   uint16
-	par   [4][8]uint16
-	pdr   [4][8]uint16
-	pages [4][8]page
-	space uint16
+	sr0    uint16
+	sr2    uint16
+	par    [4][8]uint16
+	pdr    [4][8]uint16
+	pages  [4][8]page
+	mapped uint32 // how many times a page has changed, for a core
+	space  uint16
 
 	mem []uint16
+
+	core Core // what executes the instructions it can, if anything does
 }
 
 // Memory gives the machine its memory, words of it from address 0 up and

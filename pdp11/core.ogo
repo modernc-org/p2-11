@@ -1,0 +1,76 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// A core: what executes the machine's instructions faster than its own code
+// does, somewhere else, such as on a cog of its own in the P2's instructions.
+// It works on the machine's state where the machine keeps it, which Places
+// says, while Run waits for it, so nothing is copied to it or back.
+
+import "unsafe"
+
+// A Core executes instructions of a machine for Run. An instruction it
+// executes, it executes as the machine would, with every effect the machine's
+// own code would have; one it would rather not, it leaves to the machine with
+// nothing changed, the program counter at it. That is how what is rare stays
+// the machine's: the I/O page, traps and interrupts, an access the memory
+// management does not admit. It is given no instruction while the trace bit
+// is set, nor while a trap or an interrupt is due.
+type Core interface {
+	// Execute executes at most n instructions from where the program
+	// counter is, and answers how many it executed. If that is fewer than
+	// n, the instruction at the program counter is the machine's.
+	Execute(n uint32) uint32
+}
+
+// Accelerate has c execute what it can of the instructions Run executes, or
+// the machine all of them if c is nil.
+func (m *Machine) Accelerate(c Core) {
+	m.core = c
+}
+
+// Places is where a machine keeps what a core works on, by address. A core
+// reads and writes the registers, the status word and SR2, and reads the rest.
+//
+// What a page admits is bits: 1 a read, 2 a write, and 4 that a word of it has
+// been written, which a write to it must leave set.
+type Places struct {
+	R      uintptr // the general registers, [8]uint16
+	PSW    uintptr // the status word, uint16
+	SR0    uintptr // the status of the memory management, uint16
+	SR2    uintptr // the address of the last instruction fetched, uint16
+	Pages  uintptr // what the page registers come to, [4][8] pages by mode
+	Mapped uintptr // how many times they have changed, uint32
+	Memory uintptr // the first word of memory, if there is one
+	Words  uint32  // how many words of memory there are
+
+	// A page: how many bytes it takes, and where in it are where it begins
+	// on the bus, uint32, the least and the greatest offset into it within
+	// its length, uint16 each, and what it admits, uint16.
+	PageSize, PageBase, PageLow, PageHigh, PageMay uintptr
+}
+
+// Places answers where the machine keeps what a core works on.
+func (m *Machine) Places() Places {
+	p := &m.pages[0][0]
+	at := uintptr(unsafe.Pointer(p))
+	var memory uintptr
+	if len(m.mem) != 0 {
+		memory = uintptr(unsafe.Pointer(&m.mem[0]))
+	}
+	return Places{
+		R:        uintptr(unsafe.Pointer(&m.R[0])),
+		PSW:      uintptr(unsafe.Pointer(&m.psw)),
+		SR0:      uintptr(unsafe.Pointer(&m.sr0)),
+		SR2:      uintptr(unsafe.Pointer(&m.sr2)),
+		Pages:    at,
+		Mapped:   uintptr(unsafe.Pointer(&m.mapped)),
+		Memory:   memory,
+		Words:    uint32(len(m.mem)),
+		PageSize: uintptr(unsafe.Pointer(&m.pages[0][1])) - at,
+		PageBase: uintptr(unsafe.Pointer(&p.base)) - at,
+		PageLow:  uintptr(unsafe.Pointer(&p.low)) - at,
+		PageHigh: uintptr(unsafe.Pointer(&p.high)) - at,
+		PageMay:  uintptr(unsafe.Pointer(&p.may)) - at,
+	}
+}

@@ -83,6 +83,7 @@ func (m *Machine) write(a, size, v uint16) {
 		if p.may&written == 0 {
 			p.may |= written
 			m.pdr[m.space][a>>13] |= pdrWritten
+			m.mapped++
 		}
 		pa = p.base + uint32(d)
 		if pa >= ioBase {

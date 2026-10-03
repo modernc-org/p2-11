@@ -137,6 +137,7 @@ func (m *Machine) mapPage(mode, n uint16) {
 	if pdr&pdrWritten != 0 {
 		p.may |= written
 	}
+	m.mapped++
 }
 
 // abort ends an access at the address a that the page does not admit, cycle
