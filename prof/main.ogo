@@ -9,11 +9,14 @@
 // both and fall out.
 //
 // It is built and run as the emulator is, checked or not and at the clock
-// asked for, which is what the measurement is of.
+// asked for, which is what the measurement is of; and every shape is measured
+// twice, by the machine alone and with the core, package core, executing what
+// it can of it.
 
 import (
 	"p2"
 
+	"modernc.org/p2-11/core"
 	"modernc.org/p2-11/dl11"
 	"modernc.org/p2-11/kw11"
 	"modernc.org/p2-11/mac"
@@ -176,13 +179,8 @@ func clocks(s *shape, k int) uint32 {
 	}
 }
 
-func main() {
-	machine.Memory(memory[:])
-	if !attach() {
-		println("no room on the bus")
-		return
-	}
-	// The benchmark the emulator runs first, for the same number.
+// bench runs the benchmark the emulator runs first, for the same number.
+func bench(with string) {
 	machine.Reset()
 	machine.Load(mac.BenchAt, mac.Bench[:])
 	machine.R[7] = mac.BenchStart
@@ -190,17 +188,41 @@ func main() {
 	for machine.Run(1<<20) != pdp11.Halted {
 	}
 	t = p2.GetMs() - t
-	printf("%d instructions in %d ms, %d a second\n", machine.Count, t, uint64(machine.Count)*1000/uint64(t))
+	printf("%d instructions in %d ms, %d a second%s\n", machine.Count, t, uint64(machine.Count)*1000/uint64(t), with)
+}
 
-	printf("%d MHz, %d passes, clocks an instruction:\n", p2.ClockFreq()/1000000, n)
-	for i := 0; i < len(shapes); i++ {
-		s := &shapes[i]
-		t8 := clocks(s, 8)
-		t16 := clocks(s, 16)
-		if t8 == 0 || t16 == 0 {
-			continue
-		}
-		printf("%-36s %5d\n", s.name, (t16-t8)/uint32(8*n*s.each))
+// per answers what an instruction of the shape costs, or 0 if it could not be
+// measured.
+func per(s *shape) uint32 {
+	t8 := clocks(s, 8)
+	t16 := clocks(s, 16)
+	if t8 == 0 || t16 == 0 {
+		return 0
 	}
+	return (t16 - t8) / uint32(8*n*s.each)
+}
+
+var alone [len(shapes)]uint32
+
+func main() {
+	machine.Memory(memory[:])
+	if !attach() {
+		println("no room on the bus")
+		return
+	}
+	bench("")
+	for i := 0; i < len(shapes); i++ {
+		alone[i] = per(&shapes[i])
+	}
+	if !core.Attach(&machine) {
+		println("no core")
+		return
+	}
+	bench(", with the core")
+	printf("%d MHz, %d passes, clocks an instruction, alone and with the core:\n", p2.ClockFreq()/1000000, n)
+	for i := 0; i < len(shapes); i++ {
+		printf("%-36s %5d %5d\n", shapes[i].name, alone[i], per(&shapes[i]))
+	}
+	core.Detach(&machine)
 	println("done")
 }

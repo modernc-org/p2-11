@@ -47,7 +47,7 @@ var (
 // are there.
 func bus() bool {
 	if !onBus {
-		onBus = attach()
+		onBus = attach() && accelerate()
 	}
 	return onBus
 }

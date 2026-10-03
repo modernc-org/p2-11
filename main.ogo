@@ -6,12 +6,12 @@
 // line the program was loaded through, so the terminal of "ogo run" is the
 // terminal of the PDP-11.
 //
-// The machine takes five cogs. One steps the processor. One does nothing but
-// read the serial line, because a byte that arrives while a cog is elsewhere
-// is lost. One writes the serial line, a byte taking as long to leave as forty
-// or so instructions take to execute. One counts the cycles of a power line
-// there is none of, for the line clock. One moves blocks between the SD card
-// and memory, for the disk.
+// The machine takes six cogs. One steps the processor, and another executes
+// what it can of its instructions in the P2's own, the core, which makes it
+// five times as fast. One does nothing but read the serial line, because a
+// byte that arrives while a cog is elsewhere is lost. One writes the serial
+// line. One counts the cycles of a power line there is none of, for the line
+// clock. One moves blocks between the SD card and memory, for the disk.
 //
 // With a card in the slot that has a file RK0.DSK, the machine begins with
 // what is on that pack. Without one it runs a program of its own.
@@ -19,6 +19,7 @@
 import (
 	"p2"
 
+	"modernc.org/p2-11/core"
 	"modernc.org/p2-11/dl11"
 	"modernc.org/p2-11/kw11"
 	"modernc.org/p2-11/mac"
@@ -95,6 +96,17 @@ func attach() bool {
 		machine.Attach(&console, 0o177560, dl11.Size, 4)
 }
 
+// accelerate has the core execute what it can of the machine's instructions,
+// on a cog of its own. Without a cog for it, the machine executes all of them
+// itself, and is a fifth as fast. It reports whether there was a cog.
+func accelerate() bool {
+	if !core.Attach(&machine) {
+		println("no cog for the core, which makes the machine a fifth as fast")
+		return false
+	}
+	return true
+}
+
 // run loads a program, starts it, and runs the machine until it halts. It
 // reports whether it did.
 func run(at, start uint16, program []uint16) bool {
@@ -121,6 +133,7 @@ func main() {
 		println("no room on the bus")
 		return
 	}
+	accelerate()
 	go receive()
 	go transmit()
 	go line()
