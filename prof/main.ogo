@@ -179,11 +179,16 @@ func clocks(s *shape, k int) uint32 {
 	}
 }
 
-// bench runs the benchmark the emulator runs first, for the same number.
-func bench(with string) {
+// bench runs the benchmark the emulator runs first, for the same number,
+// with the memory management on if managed is set, every page of the kernel
+// where its address says.
+func bench(with string, managed bool) {
 	machine.Reset()
 	machine.Load(mac.BenchAt, mac.Bench[:])
 	machine.R[7] = mac.BenchStart
+	if managed {
+		unit()
+	}
 	t := p2.GetMs()
 	for machine.Run(1<<20) != pdp11.Halted {
 	}
@@ -210,7 +215,8 @@ func main() {
 		println("no room on the bus")
 		return
 	}
-	bench("")
+	bench("", false)
+	bench(", the unit on", true)
 	for i := 0; i < len(shapes); i++ {
 		alone[i] = per(&shapes[i])
 	}
@@ -218,7 +224,8 @@ func main() {
 		println("no core")
 		return
 	}
-	bench(", with the core")
+	bench(", with the core", false)
+	bench(", with the core and the unit on", true)
 	printf("%d MHz, %d passes, clocks an instruction, alone and with the core:\n", p2.ClockFreq()/1000000, n)
 	for i := 0; i < len(shapes); i++ {
 		printf("%-36s %5d %5d\n", shapes[i].name, alone[i], per(&shapes[i]))
