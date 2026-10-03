@@ -1,0 +1,309 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+import (
+	"testing"
+
+	"modernc.org/p2-11/pdp11"
+)
+
+// The core against the machine's own code. Two machines in the same state,
+// one with the core and one without, are given the same instruction, and must
+// come out of it the same: registers, status word, both stack pointers, the
+// memory management's registers and memory. An instruction the core hands
+// back is the machine's on both, so what is tested is what the core executes
+// itself, which is most of what a random instruction is; how much, the tests
+// say.
+
+const (
+	// memWords is how much memory each machine has. An address is mostly one in
+	// it, so that an operand is mostly in memory and not a bus error.
+	memWords = 1024
+
+	// trials is how many instructions are compared one by one, and runs how
+	// many times a run of them is.
+	trials = 10000
+	runs   = 300
+
+	// maxFailures is how many differences are reported before a test gives
+	// up.
+	maxFailures = 10
+)
+
+var (
+	plain, fast pdp11.Machine
+	plainMemory [memWords]uint16
+	fastMemory  [memWords]uint16
+
+	seed     uint32 = 2026
+	failures int
+)
+
+// random answers the next number of a xorshift generator, so that a failure
+// is the same failure when it is run again.
+func random() uint32 {
+	seed ^= seed << 13
+	seed ^= seed >> 17
+	seed ^= seed << 5
+	return seed
+}
+
+// address answers an address that is mostly of a word in memory, now and
+// then of a byte, and now and then anywhere at all.
+func address() uint16 {
+	switch random() % 16 {
+	case 0:
+		return uint16(random())
+	case 1:
+		return uint16(random() % (2 * memWords))
+	}
+	return uint16(random()%memWords) << 1
+}
+
+// machines gives the two machines their memory, the same at random, and the
+// core to the fast one. It reports whether there was a core.
+func machines() bool {
+	plain.Memory(plainMemory[:])
+	fast.Memory(fastMemory[:])
+	if !Attach(&fast) {
+		println("no core")
+		return false
+	}
+	for i := range plainMemory {
+		v := address() // which an operand may point at
+		plainMemory[i] = v
+		fastMemory[i] = v
+	}
+	return true
+}
+
+// A state is what a trial begins with.
+type state struct {
+	r        [8]uint16
+	ksp, usp uint16
+	psw      uint16
+	sr0      uint16
+	par, pdr [16]uint16 // the kernel's eight and the user's eight
+}
+
+// randomState answers a state at random: registers that mostly hold
+// addresses in memory, the kernel's mode or the user's, and the memory
+// management on half of the time, with pages that mostly map memory and admit
+// what is asked of them, so that the core mostly executes the instruction.
+func randomState() state {
+	var s state
+	for i := 0; i < 7; i++ {
+		s.r[i] = address()
+	}
+	s.r[7] = uint16(random()%(2*memWords-8)) &^ 1
+	s.ksp = address()
+	s.usp = address()
+	modes := [2]uint16{0, 3}
+	s.psw = modes[random()%2]<<14 | modes[random()%2]<<12 | 7<<5 | uint16(random()%16)
+	if random()%2 == 0 {
+		s.sr0 = 1
+	}
+	accesses := [8]uint16{0, 2, 6, 6, 6, 6, 6, 6}
+	for i := 0; i < 16; i++ {
+		s.par[i] = uint16(random() % 4)
+		if random()%16 == 0 {
+			s.par[i] = uint16(random()) & 0o7777
+		}
+		length, down := uint16(0o77400), uint16(0)
+		if random()%4 == 0 {
+			length = uint16(random()%128) << 8
+			down = uint16(random()%2) << 3
+		}
+		written := uint16(1) << 6
+		if random()%4 == 0 {
+			written = 0
+		}
+		s.pdr[i] = length | down | written | accesses[random()%8]
+	}
+	return s
+}
+
+// set puts the state into a machine, its pages too if pages is set: they are
+// changed less often than the rest, which is quicker. The stack pointers are
+// set as the console would: the one of the mode the status word says is R6.
+func set(m *pdp11.Machine, s *state, pages bool) {
+	m.Reset()
+	for i := uint16(0); pages && i < 8; i++ {
+		m.Deposit(0o172340+2*i, s.par[i])
+		m.Deposit(0o172300+2*i, s.pdr[i])
+		m.Deposit(0o177640+2*i, s.par[8+i])
+		m.Deposit(0o177600+2*i, s.pdr[8+i])
+	}
+	m.Deposit(0o177572, s.sr0)
+	m.SetPSW(0o140000)
+	m.R[6] = s.usp
+	m.SetPSW(0)
+	m.R[6] = s.ksp
+	m.SetPSW(s.psw)
+	for i := 0; i < 6; i++ {
+		m.R[i] = s.r[i]
+	}
+	m.R[7] = s.r[7]
+}
+
+// stacks answers the kernel's stack pointer and the user's.
+func stacks(m *pdp11.Machine) (uint16, uint16) {
+	psw := m.PSW()
+	m.SetPSW(psw &^ 0o140000)
+	k := m.R[6]
+	m.SetPSW(psw | 0o140000)
+	u := m.R[6]
+	m.SetPSW(psw)
+	return k, u
+}
+
+// same reports whether the two machines are in the same state, and says what
+// differs if they are not, and of which instruction. Memory that differs is
+// made the same again.
+func same(what string, ir uint16) bool {
+	alike = true
+	doing, instruction = what, ir
+	for i := 0; i < 8; i++ {
+		differ("R", plain.R[i], fast.R[i])
+	}
+	differ("PSW", plain.PSW(), fast.PSW())
+	pk, pu := stacks(&plain)
+	fk, fu := stacks(&fast)
+	differ("KSP", pk, fk)
+	differ("USP", pu, fu)
+	differ("instructions", uint16(plain.Count), uint16(fast.Count))
+	for i := uint16(0); i < 2; i++ {
+		x, _ := plain.Examine(0o177572 + 4*i)
+		y, _ := fast.Examine(0o177572 + 4*i)
+		differ("SR0 or SR2", x, y)
+	}
+	for i := uint16(0); i < 8; i++ {
+		x, _ := plain.Examine(0o172300 + 2*i)
+		y, _ := fast.Examine(0o172300 + 2*i)
+		differ("kernel PDR", x, y)
+		x, _ = plain.Examine(0o177600 + 2*i)
+		y, _ = fast.Examine(0o177600 + 2*i)
+		differ("user PDR", x, y)
+	}
+	for i := range plainMemory {
+		if plainMemory[i] != fastMemory[i] {
+			differ("memory", plainMemory[i], fastMemory[i])
+			printf("at %06o; ", 2*i)
+			fastMemory[i] = plainMemory[i]
+		}
+	}
+	if !alike {
+		println()
+		failures++
+	}
+	return alike
+}
+
+// What same is comparing, for differ to say.
+var (
+	alike       bool
+	doing       string
+	instruction uint16
+)
+
+// differ says that a and b differ, if they do, the first time with what was
+// being compared.
+func differ(name string, a, b uint16) {
+	if a == b {
+		return
+	}
+	if alike {
+		printf("%s, instruction %06o: ", doing, instruction)
+	}
+	printf("%s %06o, with the core %06o; ", name, a, b)
+	alike = false
+}
+
+func TestLockstep(t *testing.T) {
+	if !machines() {
+		t.Fail()
+		return
+	}
+	failures = 0
+	before := Executed()
+	for i := 0; i < trials && failures < maxFailures; i++ {
+		s := randomState()
+		pc := s.r[7] >> 1
+		ir := uint16(random())
+		for j := uint16(0); j < 3; j++ {
+			v := ir
+			if j != 0 {
+				v = address() / 2 // an index, or an address
+			}
+			plainMemory[pc+j] = v
+			fastMemory[pc+j] = v
+		}
+		set(&plain, &s, i%64 == 0)
+		set(&fast, &s, i%64 == 0)
+		a := plain.Step()
+		b := fast.Step()
+		if !same("trial", ir) || a != b {
+			if a != b {
+				println("\tthe state", int(a), "and with the core", int(b))
+			}
+			t.Fail()
+		}
+	}
+	n := Executed() - before
+	println(trials, "instructions, of which the core executed", n)
+	if n < trials/3 {
+		println("the core executed too few to tell")
+		t.Fail()
+	}
+}
+
+// TestLockstepRuns has the two run a random program of instructions for a
+// while, in batches as the program runs them, and compares where they are.
+func TestLockstepRuns(t *testing.T) {
+	if !machines() {
+		t.Fail()
+		return
+	}
+	failures = 0
+	before := Executed()
+	total := uint32(0)
+	for i := 0; i < runs && failures < maxFailures; i++ {
+		s := randomState()
+		for j := range plainMemory {
+			v := uint16(random())
+			if random()%4 != 0 {
+				// mostly two-operand instructions in registers and
+				// near memory, and branches, which go on
+				v = uint16(random()%6+1)<<12 | uint16(random()%0o10000)
+			}
+			plainMemory[j] = v
+			fastMemory[j] = v
+		}
+		for a := 0; a < 0o400; a += 4 {
+			pc := uint16(0o400+random()%(2*memWords-0o400)) &^ 1
+			plainMemory[a/2], fastMemory[a/2] = pc, pc
+			plainMemory[a/2+1], fastMemory[a/2+1] = 0o340, 0o340
+		}
+		s.ksp = uint16(0o1000+random()%(2*memWords-0o1000)) &^ 1
+		s.par[0], s.pdr[0] = 0, 0o77506
+		set(&plain, &s, true)
+		set(&fast, &s, true)
+		steps := uint32(random()%500 + 1)
+		a := plain.Run(steps)
+		b := fast.Run(steps)
+		total += plain.Count
+		if !same("run", uint16(i)) || a != b {
+			if a != b {
+				println("\tthe state", int(a), "and with the core", int(b))
+			}
+			t.Fail()
+		}
+	}
+	n := Executed() - before
+	println(runs, "runs of", total, "instructions, of which the core executed", n)
+	if n < total/4 {
+		println("the core executed too few to tell")
+		t.Fail()
+	}
+}

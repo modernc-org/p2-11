@@ -47,8 +47,12 @@ printf 'module %s\n\ngo 1.25\n' "$module" > "$twin/go.mod"
 cd "$root"
 find . -name '*.ogo' -not -path './tmp/*' -not -path './guest/*' -not -path './tools/*' -printf '%h\n' | sort -u |
 	while read -r dir; do
-		# A package that imports p2 is for the board only.
+		# A package that imports p2, or carries a Spin2 object, is for the
+		# board only.
 		if grep -q -s -E '^(import)?[[:space:]]*"p2"' "$dir"/*.ogo; then
+			continue
+		fi
+		if compgen -G "$dir/*.spin2" > /dev/null; then
 			continue
 		fi
 		if [ "$dir" = . ]; then

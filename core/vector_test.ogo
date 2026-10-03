@@ -1,0 +1,274 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+import (
+	"testing"
+
+	"modernc.org/p2-11/pdp11"
+)
+
+// The vectors of pdp11, which say what the 11/40 of SimH made of each
+// instruction, run with the core executing what it can of them.
+// vectors_test.ogo is pdp11's, which this directory links to, and what
+// follows is pdp11's vector_test.ogo through the machine's exported methods:
+// a stack pointer of either mode is set and read as the console would, by
+// changing the mode.
+
+const (
+	// region is where a case's memory is laid out: the first bytes of it,
+	// which are compared word by word. Of the rest a case names what it
+	// touches.
+	region = 0o4000
+
+	// A case is this many numbers and then three for every word it names.
+	// Its first three are these.
+	caseSteps  = 0
+	caseHalted = 1
+	caseWords  = 2
+	caseSize   = 3 + 2*stateSize
+
+	// The machine before and after is R0 to R5 and then these.
+	stateSP   = 6
+	stateKSP  = 7
+	stateUSP  = 8
+	statePC   = 9
+	statePSW  = 10
+	stateSize = 11
+
+	// vectorFailures is how many cases are reported before the test gives
+	// up.
+	vectorFailures = 10
+
+	sr0Address  = 0o177572
+	kernelPages = 0o172300
+	userPages   = 0o177600
+	userMode    = 0o140000
+)
+
+var stateNames = [stateSize]string{"R0", "R1", "R2", "R3", "R4", "R5", "SP", "KSP", "USP", "PC", "PSW"}
+
+var (
+	// vm is the machine the vectors run on, with as much memory as SimH was
+	// given.
+	vm       pdp11.Machine
+	vmMemory [28 * 1024]uint16
+
+	// want is what a case's memory is to be after it.
+	want [region / 2]uint16
+
+	// current is the case being run, number says which it is, and good that
+	// nothing has differed in it so far.
+	current []uint16
+	number  int
+	good    bool
+)
+
+// background is what the address a holds before a case puts its own there: the
+// vectors of the traps, each leading to two NOPs, and nothing else. The
+// vector of the memory management, 250, leads there too.
+func background(a uint16) uint16 {
+	switch {
+	case a >= 0o4 && a < 0o40:
+		if a&2 == 0 {
+			return 0o3400 + a
+		}
+		return 0o340 + a>>2
+	case a >= 0o3404 && a < 0o3440:
+		return 0o000240
+	case a == 0o250:
+		return 0o3650
+	case a == 0o252:
+		return 0o352
+	case a >= 0o3650 && a < 0o3670:
+		return 0o000240
+	}
+	return 0
+}
+
+// managed is what the registers of the memory management hold before a case
+// sets its own: every page of both modes where the address says it is, the
+// eighth on the I/O page, and the unit off.
+func managed(vm *pdp11.Machine) {
+	for mode := 0; mode < 2; mode++ {
+		block := uint16(kernelPages)
+		if mode == 1 {
+			block = userPages
+		}
+		for n := uint16(0); n < 8; n++ {
+			par := n << 7
+			if n == 7 {
+				par = 0o7600
+			}
+			vm.Deposit(block+0o40+2*n, par)
+			vm.Deposit(block+2*n, 0o77406)
+		}
+	}
+	vm.Deposit(sr0Address, 0)
+}
+
+func TestVectors(t *testing.T) {
+	vm.Memory(vmMemory[:])
+	if !Attach(&vm) {
+		println("no core")
+		t.Fail()
+		return
+	}
+	before := Executed()
+	steps := uint32(0)
+	failed := 0
+	number = 0
+	for v := vectors[:]; len(v) != 0; number++ {
+		size := caseSize + 3*int(v[caseWords])
+		current = v[:size]
+		steps += runCase()
+		if !good {
+			t.Fail()
+			failed++
+			if failed == vectorFailures {
+				println("and there may be more")
+				return
+			}
+		}
+		v = v[size:]
+	}
+	if !untouched() {
+		t.Fail()
+	}
+	println(number, "vectors,", steps, "steps, of which the core executed", Executed()-before)
+}
+
+// untouched reports whether memory past the region holds nothing, which is
+// what the cases leave it holding. It says what it finds there and removes it.
+func untouched() bool {
+	ok := true
+	for i := region / 2; i < len(vmMemory); i++ {
+		if vmMemory[i] != 0 {
+			printf("vector %d or one before it: memory at %06o %06o, which no case names\n",
+				number, 2*i, vmMemory[i])
+			vmMemory[i] = 0
+			ok = false
+		}
+	}
+	return ok
+}
+
+// runCase runs the current case, leaves in good whether the machine came out
+// of it as the reference did, having said what differs if it did not, and
+// answers how many steps it took.
+func runCase() uint32 {
+	before := current[caseSize-2*stateSize : caseSize-stateSize]
+	after := current[caseSize-stateSize : caseSize]
+	named := current[caseSize:]
+
+	vm.Reset()
+	managed(&vm)
+	for a := uint16(0); a < region; a += 2 {
+		v := background(a)
+		vmMemory[a>>1] = v
+		want[a>>1] = v
+	}
+	for i := 0; i < len(named); i += 3 {
+		a := named[i]
+		switch {
+		case a >= pdp11.IOPage:
+			vm.Deposit(a, named[i+1])
+		case a < region:
+			vmMemory[a>>1] = named[i+1]
+			want[a>>1] = named[i+2]
+		default:
+			vmMemory[a>>1] = named[i+1]
+		}
+	}
+
+	copy(vm.R[:6], before)
+	vm.SetPSW(userMode)
+	vm.R[6] = before[stateUSP]
+	vm.SetPSW(0)
+	vm.R[6] = before[stateKSP]
+	vm.SetPSW(before[statePSW])
+	vm.R[6] = before[stateSP]
+	vm.R[7] = before[statePC]
+
+	doing := pdp11.Running
+	steps := uint32(0)
+	for ; steps < uint32(current[caseSteps]) && doing == pdp11.Running; steps++ {
+		doing = vm.Step()
+	}
+
+	good = true
+	if halted := current[caseHalted] != 0; halted != (doing == pdp11.Halted) {
+		differs()
+		println("\tthe state is", int(doing), "and the reference halted:", halted)
+	}
+	if vm.Count != steps {
+		differs()
+		println("\tinstructions counted:", vm.Count, "in", steps, "steps")
+	}
+	for i := 0; i < stateSize; i++ {
+		if got := stateOf(i); got != after[i] {
+			differs()
+			printf("\t%s %06o, want %06o\n", stateNames[i], got, after[i])
+		}
+	}
+	for a := 0; a < region; a += 2 {
+		if got := vmMemory[a>>1]; got != want[a>>1] {
+			differs()
+			printf("\tmemory at %06o %06o, want %06o\n", a, got, want[a>>1])
+		}
+	}
+	for i := 0; i < len(named); i += 3 {
+		switch a := named[i]; {
+		case a >= pdp11.IOPage:
+			if got, _ := vm.Examine(a); got != named[i+2] {
+				differs()
+				printf("\tregister %06o %06o, want %06o\n", a, got, named[i+2])
+			}
+		case a >= region:
+			if got := vmMemory[a>>1]; got != named[i+2] {
+				differs()
+				printf("\tmemory at %06o %06o, want %06o\n", a, got, named[i+2])
+			}
+			vmMemory[a>>1] = 0 // as the next case expects to find it
+		}
+	}
+	return steps
+}
+
+// stateOf answers the part of the machine that a case has at i.
+func stateOf(i int) uint16 {
+	switch i {
+	case stateSP:
+		return vm.R[6]
+	case stateKSP:
+		k, _ := stacks(&vm)
+		return k
+	case stateUSP:
+		_, u := stacks(&vm)
+		return u
+	case statePC:
+		return vm.R[7]
+	case statePSW:
+		return vm.PSW()
+	}
+	return vm.R[i]
+}
+
+// differs notes that the current case is not good, and says which case it is
+// if that is news.
+func differs() {
+	if !good {
+		return
+	}
+	good = false
+	named := current[caseSize:]
+	pc := current[caseSize-2*stateSize+statePC]
+	ir := background(pc)
+	for i := 0; i < len(named); i += 3 {
+		if named[i] == pc {
+			ir = named[i+1]
+		}
+	}
+	printf("vector %d, instruction %06o at %06o, status word %06o, %d steps\n",
+		number, ir, pc, current[caseSize-stateSize-1], current[caseSteps])
+}

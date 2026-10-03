@@ -1,0 +1,114 @@
+// Copyright 2026 The p2-11 Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package core executes the common instructions of a pdp11.Machine in the
+// P2's own, on a cog of its own, which is what makes the machine about as
+// fast as an 11/40 was. The machine's own code stays what executes the rest,
+// and what everything is tested against: the core hands it back whatever it
+// would rather not do, the I/O page, traps and interrupts, an access the
+// memory management does not admit, unexecuted.
+//
+// The core is PASM, core.spin2, and works on the machine's state where the
+// machine keeps it, which pdp11.Machine.Places says, so that nothing is
+// copied between the two: the machine waits while the core runs.
+//
+// It runs on the board only: the host's compiler cannot build a program that
+// calls a Spin2 object.
+import "modernc.org/p2-11/pdp11"
+
+// The block the program shares with the core's cog, by long: what the core is
+// to do, how many instructions it executed, and where the machine keeps its
+// state.
+const (
+	command = iota
+	executed
+	registers
+	statusWord
+	statusReg
+	addressReg
+	pages
+	mapped
+	memory
+	words
+
+	blockSize
+)
+
+// The layout of a page of the machine's that the core is written for.
+const (
+	pageSize = 12
+	pageBase = 0
+	pageLow  = 4
+	pageHigh = 6
+	pageMay  = 8
+)
+
+var block [blockSize]uint32
+
+// start, stop, execute and bind are core.spin2's.
+func start(block *[blockSize]uint32) int
+func stop()
+func execute(n uint32) uint32
+func bind() int
+
+// A cog is the core's cog, which works for one machine at a time.
+type cog struct {
+	running  bool
+	executed uint32 // instructions, since the core was started
+}
+
+// Execute executes at most n instructions of the machine the core works for.
+func (c *cog) Execute(n uint32) uint32 {
+	n = execute(n)
+	c.executed += n
+	return n
+}
+
+var core cog
+
+// Executed answers how many instructions the core has executed since it was
+// started.
+func Executed() uint32 {
+	return core.executed
+}
+
+// Attach starts the core on a cog of its own, unless it runs, and has it
+// execute what it can of m's instructions. It reports whether it could: there
+// may be no cog left for it, and m may keep its state otherwise than the core
+// is written for. m's memory is what it was given last.
+func Attach(m *pdp11.Machine) bool {
+	p := m.Places()
+	if p.PageSize != pageSize || p.PageBase != pageBase || p.PageLow != pageLow ||
+		p.PageHigh != pageHigh || p.PageMay != pageMay {
+		return false
+	}
+	if !core.running {
+		if start(&block) == 0 {
+			return false
+		}
+		core.running = true
+		core.executed = 0
+	}
+	block[registers] = uint32(p.R)
+	block[statusWord] = uint32(p.PSW)
+	block[statusReg] = uint32(p.SR0)
+	block[addressReg] = uint32(p.SR2)
+	block[pages] = uint32(p.Pages)
+	block[mapped] = uint32(p.Mapped)
+	block[memory] = uint32(p.Memory)
+	block[words] = p.Words
+	bind()
+	m.Accelerate(&core)
+	return true
+}
+
+// Detach has m execute all of its instructions itself again, and stops the
+// core.
+func Detach(m *pdp11.Machine) {
+	m.Accelerate(nil)
+	if core.running {
+		stop()
+		core.running = false
+	}
+}

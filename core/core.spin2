@@ -1,0 +1,1198 @@
+' Copyright 2026 The p2-11 Authors. All rights reserved.
+' Use of this source code is governed by a BSD-style
+' license that can be found in the LICENSE file.
+
+' The core: the PDP-11's common instructions in the P2's own, on a cog of its
+' own. The program hands it a number of instructions and waits; the core
+' executes them on the machine's own registers, status word and memory,
+' which it reads from hub RAM when it begins and writes back when it ends,
+' and says how many it executed. An instruction it would rather not execute
+' it leaves to the machine, unexecuted and with nothing changed: it ends the
+' batch with the program counter at it, and the machine executes it.
+'
+' What the program and the core share is a block of longs: what the core is
+' to do, how many instructions it executed, and where the machine keeps its
+' state, which core.ogo writes there.
+'
+' The core does what pdp11/exec.ogo, operand.ogo and bus.ogo do, in their
+' order, for every instruction but these, which it hands back: HALT, WAIT,
+' RESET, RTI, RTT, BPT, IOT, EMT, TRAP, MARK, MUL, DIV, ASH, ASHC, the
+' reserved and the floating point instructions, a JMP or JSR to a register,
+' JSR SP, and MFPI and MTPI of the other mode's stack pointer. It hands back
+' an instruction that would touch the I/O page or memory that is not there,
+' read or write a word at an odd address, find an access the memory
+' management does not admit, write first to a page, or leave the kernel's
+' stack below 400: in each the machine traps, or does what only it does.
+'
+' Until an instruction is sure to complete it changes nothing but the
+' registers its operands step, and those it notes, so that a hand-back can
+' undo them. The writes come last, when nothing can fail any more.
+'
+' The cog's registers hold the PDP-11's, the core's own and its tables, and
+' the code that is most of what it executes; the rest of the code is in the
+' LUT, which executes as fast, with the pages of the memory management at its
+' end.
+
+CON
+  COMMAND  = 0                  ' the block: what the core is to do,
+  EXECUTED = 1                  ' how many instructions it executed,
+  PLACE    = 2                  ' and from here where the machine is
+  PLACES   = 8                  ' in so many longs
+
+  RELOAD   = $8000_0000         ' the command to read the places again
+
+  IOPAGE   = $E000              ' where the I/O page begins, with the unit off
+  IOBASE   = $3_E000            ' and on the bus of 18 bits
+  ERRORS   = $E000              ' SR0's error bits, which hold SR2 when set
+  MODE     = $C000              ' the current mode in the status word, 0 the kernel's
+  LIMIT    = $100               ' the kernel's stack limit, 400
+
+  PAGESIZE  = 12                ' bytes of a page in the machine, and a mode's
+  MODEPAGES = 8 * PAGESIZE      ' eight
+
+  ' What a page admits, and what an access asks of it: a read, a write,
+  ' and a write to a page that has been written to, since the first write to
+  ' one is the machine's, which marks it.
+  DATI     = 1
+  DATO     = 2 | 4
+  DATIP    = DATI | DATO
+
+  ' The condition codes.
+  CC       = $F
+  NF       = 8
+  ZF       = 4
+  VF       = 2
+
+  ' The pages of the kernel and of the user in the LUT, as the machine keeps
+  ' them: three longs a page, where it begins on the bus, the least offset
+  ' into it within its length and the greatest, and what it admits.
+  KTAB     = $1D0
+  UTAB     = $1E8
+
+VAR
+  long cog                      ' the core's cog and 1, or 0 when none runs
+  long block                    ' the block's address
+
+PUB start(b) : ok
+  stop()
+  block := b
+  cog := coginit(16, @entry, b) + 1
+  return cog
+
+PUB stop()
+  if cog
+    cogstop(cog - 1)
+    cog := 0
+
+' execute hands the core so many instructions, waits for it to be done, which
+' it says by clearing the command, and answers how many it executed.
+PUB execute(many) : did | p
+  p := block
+  org
+                wrlong  many, p
+.wait           rdlong  did, p          wz
+        if_nz   jmp     #.wait
+                add     p, #EXECUTED * 4
+                rdlong  did, p
+  end
+
+' bind has the core read where the machine keeps its state.
+PUB bind() : ok | p
+  p := block
+  org
+                wrlong  ##RELOAD, p
+.wait           rdlong  ok, p           wz
+        if_nz   jmp     #.wait
+  end
+  return 1
+
+DAT
+                org     0
+
+' The core begins by copying the rest of its code into the LUT, and idles
+' until it has a command, reading the block's first long.
+entry           mov     blk, ptra
+                mov     t, ptrb
+                add     t, ##@lutcode - @entry
+                setq2   #lutend - lutcode - 1
+                rdlong  0, t
+idle            rdlong  cmd, blk        wz
+        if_z    jmp     #idle
+                testb   cmd, #31        wc
+        if_c    jmp     #\rebind
+
+' A batch: cmd instructions at the most, from where the program counter is.
+                mov     left, cmd
+                mov     count, #0
+                call    #\load
+
+' An instruction. pc0 is where it is, and ulog how many changes to the
+' registers it has noted, for a hand-back to undo.
+fetch           mov     pc0, r7
+                mov     ulog, #0
+                testb   r7, #0          wc
+        if_c    jmp     #handback       ' an odd address: the machine traps
+                jmp     fetchx
+
+' The instruction's place with the memory management off,
+foff            mov     ha, r7
+                add     ha, membase
+                cmp     ha, limit0      wc
+        if_nc   jmp     #handback
+                jmp     #decode
+
+' and on, where the page the program is in is looked up once.
+fon             mov     pg, r7
+                shr     pg, #13
+                cmp     pg, cpage       wz
+        if_nz   call    #\code
+                mov     d, r7
+                zerox   d, #12
+                mov     t1, d
+                sub     t1, clow
+                cmp     cspan, t1       wc
+        if_c    jmp     #handback       ' past the page's length
+                mov     ha, chub
+                add     ha, d
+                cmp     ha, limit1      wc
+        if_nc   jmp     #handback
+
+' The instruction, found by its upper four bits.
+decode          rdword  ir, ha
+                add     r7, #2
+                zerox   r7, #15
+                mov     t, ir
+                shr     t, #12
+                altd    t, #optab
+                jmp     0-0
+
+' An instruction completed.
+retire          add     count, #1
+                djnz    left, #fetch
+
+' The batch ends, and what it changed goes back to the machine.
+finish          call    #\store
+endbatch        wrlong  count, doneaddr
+                wrlong  #0, blk
+                jmp     #idle
+
+' The instruction at pc0 is the machine's: what it did to the registers is
+' undone, the last change first, and the batch ends with the program counter
+' at it. With nothing executed, nothing has changed.
+handback        tjz     ulog, #.pc
+                sub     ulog, #1
+                alts    ulog, #ureg
+                mov     t, 0-0
+                alts    ulog, #uval
+                mov     t1, 0-0
+                altd    t, #r0
+                mov     0-0, t1
+                jmp     #handback
+.pc             mov     r7, pc0
+                tjnz    count, #finish
+                jmp     #endbatch
+
+' ---- The two-operand instructions: MOV, CMP, BIT, BIC, BIS and ADD, of
+' words, the first five of bytes, and SUB.
+
+dopw            mov     mask, wmask
+                mov     sbit, #15
+                mov     stp, #2
+                jmp     #dop
+dopb            mov     mask, #$FF
+                mov     sbit, #7
+                mov     stp, #1
+
+' The source, if it is in memory, before the destination is decoded; if it is
+' a register, after, so that MOV R0,(R0)+ stores the register stepped.
+dop             mov     op, ir
+                shr     op, #12
+                and     op, #7
+                mov     sspec, ir
+                shr     sspec, #6
+                and     sspec, #$3F
+                cmp     sspec, #8       wc
+        if_c    jmp     #.dst
+                cmp     sspec, #$17     wz      ' #n: the word after the instruction
+        if_nz   jmp     #.memory
+                mov     va, r7
+                add     r7, #2
+                zerox   r7, #15
+                jmp     #.read
+.memory         mov     spec, sspec
+                call    #ea
+.read           mov     cyc, #DATI
+                call    #rd
+                mov     src, val
+
+' The destination, and what it holds unless the instruction is a MOV, which
+' does not read where it writes. CMP and BIT do not write it back.
+.dst            mov     dspec, ir
+                and     dspec, #$3F
+                cmp     dspec, #8       wc
+        if_c    jmp     #.register
+                mov     spec, dspec
+                call    #ea
+                cmp     op, #1          wz
+        if_nz   jmp     #.rmw
+                mov     cyc, #DATO
+                call    #locate
+                jmp     #.source
+.rmw            mov     cyc, #DATIP
+                cmp     op, #2          wz
+        if_nz   cmp     op, #3          wz
+        if_z    mov     cyc, #DATI
+                call    #rd
+                mov     v, val
+                jmp     #.source
+.register       cmp     op, #1          wz
+        if_z    jmp     #.source
+                alts    dspec, #r0
+                mov     v, 0-0
+                and     v, mask
+.source         cmp     sspec, #8       wc
+        if_nc   jmp     #.op
+                alts    sspec, #r0
+                mov     src, 0-0
+                and     src, mask
+.op             altd    op, #doptab
+                jmp     0-0
+
+dmov            mov     r, src
+                call    #setnz
+                jmp     #dwrite
+
+dcmp            mov     r, src
+                sub     r, v            wc      ' the borrow
+                muxc    psw, #1
+                and     r, mask
+                mov     t, src                  ' the overflow: (src^v) & (^v^r)
+                xor     t, v
+                mov     t1, v
+                xor     t1, r
+                not     t1
+                and     t, t1
+                testb   t, sbit         wc
+                muxc    psw, #VF
+                call    #setn
+                jmp     #retire
+
+dbit            mov     r, src
+                and     r, v
+                call    #setnz
+                jmp     #retire
+
+dbic            mov     r, v
+                andn    r, src
+                call    #setnz
+                jmp     #dwrite
+
+dbis            mov     r, v
+                or      r, src
+                call    #setnz
+                jmp     #dwrite
+
+dadd            testb   ir, #15         wc
+        if_c    jmp     #dsub
+                mov     r, v
+                add     r, src
+                testb   r, #16          wc      ' the carry
+                muxc    psw, #1
+                and     r, mask
+                mov     t, src                  ' the overflow: (^src^v) & (src^r)
+                xor     t, v
+                not     t
+                mov     t1, src
+                xor     t1, r
+                and     t, t1
+                testb   t, sbit         wc
+                muxc    psw, #VF
+                call    #setn
+                jmp     #dwrite
+
+dsub            mov     r, v
+                sub     r, src          wc      ' the borrow
+                muxc    psw, #1
+                and     r, mask
+                mov     t, src                  ' the overflow: (src^v) & (^src^r)
+                xor     t, v
+                mov     t1, src
+                xor     t1, r
+                not     t1
+                and     t, t1
+                testb   t, sbit         wc
+                muxc    psw, #VF
+                call    #setn
+                ' and on into dwrite
+
+' The result where the destination is: in memory, or in a register, where a
+' byte MOVB moves fills the register with its sign, and any other byte leaves
+' the upper half as it was.
+dwrite          cmp     dspec, #8       wc
+        if_nc   jmp     #wmem
+                cmp     sbit, #15       wz
+        if_z    jmp     #.word
+                mov     t, ir
+                shr     t, #12
+                cmp     t, #9           wz      ' MOVB
+        if_z    signx   r, #7
+        if_z    and     r, wmask
+        if_z    jmp     #.word
+                alts    dspec, #r0
+                mov     t, 0-0
+                and     t, hmask
+                or      r, t
+.word           altd    dspec, #r0
+                mov     0-0, r
+                jmp     #retire
+
+' wmem writes r where ha is, a word or a byte as sbit says.
+wmem            cmp     sbit, #15       wz
+        if_z    wrword  r, ha
+        if_nz   wrbyte  r, ha
+                jmp     #retire
+
+' setnz sets N and Z as the result r says and clears V, leaving C; setn sets N
+' and Z only.
+setnz           andn    psw, #VF
+setn            testb   r, sbit         wc
+                muxc    psw, #NF
+                cmp     r, #0           wz
+        _ret_   muxz    psw, #ZF
+
+' ---- Operands.
+
+' ea answers in va the address of the operand spec, whose mode is not 0,
+' stepping its register as the mode says and noting that it did. stp is how
+' far (R)+ and -(R) step, but for SP and PC, which step by two.
+ea              mov     rn, spec
+                and     rn, #7
+                mov     emode, spec
+                shr     emode, #3
+                mov     stride, stp
+                cmp     rn, #6          wc
+        if_nc   mov     stride, #2
+                alts    rn, #r0
+                mov     va, 0-0
+                altd    emode, #eatab
+                jmp     0-0
+
+ea1             ret                             ' (R)
+
+ea2             call    #remember               ' (R)+
+                mov     t, va
+                add     t, stride
+                zerox   t, #15
+                altd    rn, #r0
+        _ret_   mov     0-0, t
+
+ea3             call    #remember               ' @(R)+
+                mov     t, va
+                add     t, #2
+                zerox   t, #15
+                altd    rn, #r0
+                mov     0-0, t
+                jmp     #deref
+
+ea4             call    #remember               ' -(R)
+                sub     va, stride
+                zerox   va, #15
+                altd    rn, #r0
+                mov     0-0, va
+                jmp     #limitck
+
+ea5             call    #remember               ' @-(R)
+                sub     va, #2
+                zerox   va, #15
+                altd    rn, #r0
+                mov     0-0, va
+                call    #limitck
+                jmp     #deref
+
+ea6             call    #index                  ' X(R)
+                alts    rn, #r0
+                mov     va, 0-0
+                add     va, x
+        _ret_   zerox   va, #15
+
+ea7             call    #index                  ' @X(R)
+                alts    rn, #r0
+                mov     va, 0-0
+                add     va, x
+                zerox   va, #15
+                ' and on into deref
+
+' deref answers in va the word at va.
+deref           testb   va, #0          wc
+        if_c    jmp     #handback
+                mov     cyc, #DATI
+                call    xlate
+        _ret_   rdword  va, ha
+
+' index answers in x the word after the instruction, and steps the program
+' counter past it, which is even.
+index           mov     va, r7
+                mov     cyc, #DATI
+                call    xlate
+                rdword  x, ha
+                add     r7, #2
+        _ret_   zerox   r7, #15
+
+' limitck hands the instruction back if it has stepped the kernel's stack
+' below its limit, which traps.
+limitck         cmp     rn, #6          wz
+        if_nz   ret
+                cmp     va, #LIMIT      wc
+        if_nc   ret
+                test    psw, ##MODE     wz
+        if_nz   ret
+                jmp     #handback
+
+' remember notes that the register rn is to change, and what it holds.
+remember        altd    ulog, #ureg
+                mov     0-0, rn
+                alts    rn, #r0
+                mov     t, 0-0
+                altd    ulog, #uval
+                mov     0-0, t
+        _ret_   add     ulog, #1
+
+' rd answers in val the operand at va, a word or a byte as sbit says, for the
+' access cyc, and ha where it is.
+rd              cmp     sbit, #15       wz
+        if_nz   jmp     #.byte
+                testb   va, #0          wc
+        if_c    jmp     #handback
+                call    xlate
+        _ret_   rdword  val, ha
+.byte           call    xlate
+        _ret_   rdbyte  val, ha
+
+' locate answers in ha where the operand at va is, for the access cyc,
+' without reading it.
+locate          cmp     sbit, #15       wz
+        if_nz   jmp     xlate
+                testb   va, #0          wc
+        if_c    jmp     #handback
+                jmp     xlate
+
+' xoff answers in ha where in hub RAM the address va is with the memory
+' management off, and hands the instruction back if it is not in memory.
+xoff            mov     ha, va
+                add     ha, membase
+                cmp     ha, limit0      wc
+        if_c    ret
+                jmp     #handback
+
+' xon does the same with the memory management on, for the access cyc, in the
+' pages at tab in the LUT.
+xon             mov     pg, va
+                shr     pg, #13
+                mov     t1, pg
+                shl     pg, #1
+                add     pg, t1
+                add     pg, tab
+                mov     d, va
+                zerox   d, #12
+                rdlut   ha, pg          ' where the page begins on the bus
+                add     pg, #1
+                rdlut   t2, pg          ' the least offset into it and the greatest
+                add     pg, #1
+                getword t1, t2, #0
+                cmp     d, t1           wc
+        if_c    jmp     #handback       ' before the page's length
+                getword t1, t2, #1
+                cmp     t1, d           wc
+        if_c    jmp     #handback       ' past it
+                rdlut   t2, pg          ' what it admits
+                mov     t1, cyc
+                andn    t1, t2          wz
+        if_nz   jmp     #handback       ' what it does not admit
+                add     ha, d
+                add     ha, membase
+                cmp     ha, limit1      wc
+        if_c    ret
+                jmp     #handback       ' the I/O page, or past memory
+
+' ---- Helpers of the instructions in the LUT.
+
+' words sets the sizes for a word, and wspec answers in spec the operand of
+' the instruction's lower six bits, with C set if it is a register.
+wspec           call    #words
+                mov     spec, ir
+                and     spec, #$3F
+        _ret_   cmp     spec, #8        wc
+words           mov     mask, wmask
+                mov     sbit, #15
+                mov     signv, wsign
+        _ret_   mov     stp, #2
+
+' previous has the next access go through the previous mode's pages, keeping
+' the current mode's in tsave, and hands the instruction back if the previous
+' mode is none of the 11/40's.
+previous        cmp     ptab, #0        wz
+        if_z    jmp     #handback
+                mov     tsave, tab
+        _ret_   mov     tab, ptab
+
+' samemode hands the instruction back unless the previous mode is the
+' current one, whose stack pointer is R6.
+samemode        mov     t, psw
+                shr     t, #12
+                mov     t1, t
+                shr     t1, #2
+                and     t, #3
+                cmp     t, t1           wz
+        if_z    ret
+                jmp     #handback
+
+' pushw answers in va and ha where a word pushed onto the current stack goes,
+' and hands the instruction back if the kernel's stack would go below its
+' limit, which traps.
+pushw           mov     va, r6
+                sub     va, #2
+                zerox   va, #15
+                cmp     va, #LIMIT      wc
+        if_nc   jmp     #.ok
+                test    psw, ##MODE     wz
+        if_z    jmp     #handback
+.ok             mov     cyc, #DATO
+                jmp     #locate
+
+' ---- Tables.
+
+' The instructions by their upper four bits.
+optab           long    group00, dopw, dopw, dopw, dopw, dopw, dopw, group07
+                long    group10, dopb, dopb, dopb, dopb, dopb, dopw, handback
+
+doptab          long    handback, dmov, dcmp, dbit, dbic, dbis, dadd
+
+soptab          long    sclr, scom, sinc, sdec, sneg, sadc, ssbc, stst
+                long    sror, srol, sasr, sasl
+
+eatab           long    0, ea1, ea2, ea3, ea4, ea5, ea6, ea7
+
+g00tab          long    handback, jmp_, g0002, swab_
+
+' The pages of each mode, of which the 11/40 has the kernel's and the user's.
+modetab         long    KTAB, 0, 0, UTAB
+
+' brtab: for each branch, the sixteen condition codes NZVC under which it is
+' taken, two branches a long, the first in the lower half. 000 is none; BR
+' always; BNE !Z; BEQ Z; BGE N=V; BLT N!=V; BGT !Z and N=V; BLE Z or N!=V; BPL
+' !N; BMI N; BHI !C and !Z; BLOS C or Z; BVC !V; BVS V; BCC !C; BCS C.
+brtab           long    $FFFF_0000, $F0F0_0F0F, $33CC_CC33, $F3FC_0C03
+                long    $FF00_00FF, $FAFA_0505, $CCCC_3333, $AAAA_5555
+
+' ---- The core's own registers.
+
+' Where the machine keeps its state, as the block says, in its order.
+raddr           long    0
+pswaddr         long    0
+sr0addr         long    0
+sr2addr         long    0
+pagesaddr       long    0
+mappedaddr      long    0
+membase         long    0
+memwords        long    0
+
+doneaddr        long    0
+limit0          long    0
+limit1          long    0
+gen             long    0
+xlate           long    xoff
+fetchx          long    foff
+wmask           long    $FFFF
+hmask           long    $FF00
+wsign           long    $8000
+
+' The PDP-11's registers while a batch runs.
+r0              long    0
+r1              long    0
+r2              long    0
+r3              long    0
+r4              long    0
+r5              long    0
+r6              long    0
+r7              long    0
+psw             long    0
+
+blk             res     1
+cmd             res     1
+left            res     1
+count           res     1
+sr0             res     1
+flags           res     1
+tab             res     1
+ptab            res     1
+cpage           res     1
+chub            res     1
+clow            res     1
+cspan           res     1
+pc0             res     1
+ir              res     1
+ulog            res     1
+ureg            res     3
+uval            res     3
+op              res     1
+sspec           res     1
+spec            res     1
+dspec           res     1
+mask            res     1
+sbit            res     1
+signv           res     1
+cbit            res     1
+stp             res     1
+stride          res     1
+rn              res     1
+emode           res     1
+lnk             res     1
+tgt             res     1
+src             res     1
+v               res     1
+r               res     1
+val             res     1
+x               res     1
+va              res     1
+ha              res     1
+cyc             res     1
+pg              res     1
+d               res     1
+t               res     1
+t1              res     1
+t2              res     1
+t3              res     1
+tsave           res     1
+tp              res     1
+rr01            res     1
+rr23            res     1
+rr45            res     1
+rr67            res     1
+                fit     496
+
+' ---- The LUT's code.
+
+                org     $200
+lutcode
+
+' ---- The one-operand instructions, 005000 to 006377 of words and 105000 to
+' 106377 of bytes.
+
+sopw            call    #\words
+                jmp     #sop
+sopb            mov     mask, #$FF
+                mov     sbit, #7
+                mov     signv, #$80
+                mov     stp, #1
+sop             mov     op, ir
+                shr     op, #6
+                and     op, #$3F
+                sub     op, #40                 ' 050 is 0, CLR
+                mov     dspec, ir
+                and     dspec, #$3F
+                cmp     dspec, #8       wc
+        if_nc   jmp     #.memory
+                alts    dspec, #r0
+                mov     v, 0-0
+                and     v, mask
+                jmp     #.op
+.memory         mov     spec, dspec
+                call    #\ea
+                cmp     op, #0          wz      ' CLR does not read it
+        if_nz   jmp     #.rmw
+                mov     cyc, #DATO
+                call    #\locate
+                jmp     #.op
+.rmw            cmp     op, #7          wz      ' TST does not write it
+        if_z    mov     cyc, #DATI
+        if_nz   mov     cyc, #DATIP
+                call    #\rd
+                mov     v, val
+
+' What becomes of it: r, and the carry and the overflow in psw. N and Z are
+' set from r after.
+.op             mov     cbit, psw
+                and     cbit, #1
+                andn    psw, #CC
+                altd    op, #soptab
+                jmp     0-0
+
+sclr            mov     r, #0
+                jmp     #sdone
+scom            mov     r, v
+                xor     r, mask
+                or      psw, #1
+                jmp     #sdone
+sinc            mov     r, v
+                add     r, #1
+                and     r, mask
+                or      psw, cbit
+                cmp     r, signv        wz
+        if_z    or      psw, #VF
+                jmp     #sdone
+sdec            mov     r, v
+                sub     r, #1
+                and     r, mask
+                or      psw, cbit
+                mov     t, signv
+                sub     t, #1
+                cmp     r, t            wz
+        if_z    or      psw, #VF
+                jmp     #sdone
+sneg            mov     r, v
+                neg     r
+                and     r, mask
+                cmp     r, signv        wz
+        if_z    or      psw, #VF
+                cmp     r, #0           wz
+        if_nz   or      psw, #1
+                jmp     #sdone
+sadc            mov     r, v
+                add     r, cbit
+                and     r, mask
+                tjz     cbit, #sdone
+                cmp     r, signv        wz
+        if_z    or      psw, #VF
+                cmp     r, #0           wz
+        if_z    or      psw, #1
+                jmp     #sdone
+ssbc            mov     r, v
+                sub     r, cbit
+                and     r, mask
+                tjz     cbit, #sdone
+                mov     t, signv
+                sub     t, #1
+                cmp     r, t            wz
+        if_z    or      psw, #VF
+                cmp     r, mask         wz
+        if_z    or      psw, #1
+                jmp     #sdone
+stst            mov     r, v
+                jmp     #sdone
+sror            mov     r, v
+                shr     r, #1
+                cmp     cbit, #0        wz
+        if_nz   or      r, signv
+                testb   v, #0           wc
+                muxc    psw, #1
+                jmp     #sshift
+srol            mov     r, v
+                shl     r, #1
+                or      r, cbit
+                and     r, mask
+                testb   v, sbit         wc
+                muxc    psw, #1
+                jmp     #sshift
+sasr            mov     r, v
+                shr     r, #1
+                mov     t, signv
+                and     t, v
+                or      r, t
+                testb   v, #0           wc
+                muxc    psw, #1
+                jmp     #sshift
+sasl            mov     r, v
+                shl     r, #1
+                and     r, mask
+                testb   v, sbit         wc
+                muxc    psw, #1
+
+' A shift overflows if the sign that came out is not the carry.
+sshift          call    #\setn
+                testb   psw, #3         wc
+                testb   psw, #0         wz
+        if_c_ne_z or    psw, #VF
+                jmp     #swrite
+
+sdone           call    #\setn
+
+' The result where the operand is, but for TST.
+swrite          cmp     op, #7          wz
+        if_z    jmp     #\retire
+                jmp     #\dwrite
+
+' ---- The branches, 000400 to 003777 and 100000 to 103777. Whether one is
+' taken is a bit of brtab: the branch's four bits, its upper three and the
+' instruction's sign, and the condition codes' four.
+branch          mov     t, ir
+                shr     t, #8
+                and     t, #7
+                testb   ir, #15         wc
+                muxc    t, #8
+                shl     t, #4
+                mov     t1, psw
+                and     t1, #CC
+                or      t, t1
+                mov     t1, t
+                shr     t1, #5
+                altd    t1, #brtab
+                testb   0-0, t          wc
+        if_nc   jmp     #\retire
+                mov     t, ir
+                signx   t, #7
+                shl     t, #1
+                add     r7, t
+                zerox   r7, #15
+                jmp     #\retire
+
+' ---- SOB, XOR and what the 070000s hold besides, which is the machine's.
+group07         mov     t, ir
+                shr     t, #9
+                and     t, #7
+                cmp     t, #7           wz
+        if_z    jmp     #sob
+                cmp     t, #4           wz
+        if_z    jmp     #xor_
+                jmp     #\handback
+
+sob             mov     t, ir
+                shr     t, #6
+                and     t, #7
+                alts    t, #r0
+                mov     v, 0-0
+                sub     v, #1
+                zerox   v, #15          wz
+                altd    t, #r0
+                mov     0-0, v
+        if_z    jmp     #\retire
+                mov     t, ir
+                and     t, #$3F
+                shl     t, #1
+                sub     r7, t
+                zerox   r7, #15
+                jmp     #\retire
+
+' XOR R,dst: what the destination holds, read and written back, with the
+' register read after.
+xor_            call    #wrmw
+                mov     t, ir
+                shr     t, #6
+                and     t, #7
+                alts    t, #r0
+                mov     r, 0-0
+                xor     r, v
+                call    #\setnz
+                jmp     #\dwrite
+
+' wrmw answers in v the word the destination of the instruction holds, which
+' it will write back, and in dspec which it is.
+wrmw            call    #\wspec
+                mov     dspec, spec
+        if_nc   jmp     #.memory
+                alts    dspec, #r0
+        _ret_   mov     v, 0-0
+.memory         call    #\ea
+                mov     cyc, #DATIP
+                call    #\rd
+        _ret_   mov     v, val
+
+' ---- 000000 to 007777 but the branches: what has no operand, JMP, RTS and
+' the condition codes, SWAB, JSR, the one-operand instructions, MARK, MFPI,
+' MTPI and SXT.
+group00         mov     t, ir
+                shr     t, #6
+                and     t, #$3F
+                cmp     t, #4           wc
+        if_c    jmp     #.low
+                cmp     t, #32          wc      ' 000400 to 003777
+        if_c    jmp     #branch
+                cmp     t, #40          wc      ' 004000 to 004777
+        if_c    jmp     #jsr_
+                cmp     t, #52          wc      ' 005000 to 006377
+        if_c    jmp     #sopw
+                cmp     t, #53          wz      ' 0065
+        if_z    jmp     #mfpi
+                cmp     t, #54          wz      ' 0066
+        if_z    jmp     #mtpi
+                cmp     t, #55          wz      ' 0067
+        if_z    jmp     #sxt_
+                jmp     #\handback              ' MARK, and what is reserved
+.low            altd    t, #g00tab
+                jmp     0-0
+
+' 100000 to 107777 but the branches.
+group10         mov     t, ir
+                shr     t, #6
+                and     t, #$3F
+                cmp     t, #32          wc      ' 100000 to 103777
+        if_c    jmp     #branch
+                cmp     t, #40          wc      ' EMT and TRAP
+        if_c    jmp     #\handback
+                cmp     t, #52          wc      ' 105000 to 106377
+        if_c    jmp     #sopb
+                cmp     t, #53          wz      ' MFPD, which is MFPI here
+        if_z    jmp     #mfpi
+                cmp     t, #54          wz      ' MTPD
+        if_z    jmp     #mtpi
+                jmp     #\handback
+
+' 000200 to 000277: RTS, then what is reserved, SPL among it, then the
+' condition codes cleared and set.
+g0002           cmp     ir, #$88        wc      ' 000210
+        if_c    jmp     #rts_
+                cmp     ir, #$A0        wc      ' 000240
+        if_c    jmp     #\handback
+                mov     t, ir
+                and     t, #CC
+                testb   ir, #4          wc
+        if_c    or      psw, t
+        if_nc   andn    psw, t
+                jmp     #\retire
+
+' JMP dst. To a register it traps.
+jmp_            call    #\wspec
+        if_c    jmp     #\handback
+                call    #\ea
+                mov     r7, va
+                jmp     #\retire
+
+' JSR R,dst: the register onto the stack, the return address into the
+' register, and on at the destination.
+jsr_            call    #\wspec
+        if_c    jmp     #\handback      ' to a register it traps
+                mov     lnk, ir
+                shr     lnk, #6
+                and     lnk, #7
+                cmp     lnk, #6         wz
+        if_z    jmp     #\handback      ' JSR SP, which nothing does
+                call    #\ea
+                mov     tgt, va
+                call    #\pushw
+                alts    lnk, #r0
+                mov     t, 0-0
+                wrword  t, ha
+                mov     r6, va
+                altd    lnk, #r0
+                mov     0-0, r7
+                mov     r7, tgt
+                jmp     #\retire
+
+' RTS R: the register into the program counter, and the register from the
+' stack.
+rts_            mov     lnk, ir
+                and     lnk, #7
+                mov     va, r6
+                call    #\words
+                mov     cyc, #DATI
+                call    #\rd
+                alts    lnk, #r0
+                mov     r7, 0-0
+                altd    lnk, #r0
+                mov     0-0, val
+                cmp     lnk, #6         wz
+        if_nz   add     r6, #2
+        if_nz   zerox   r6, #15
+                jmp     #\retire
+
+' SWAB dst: the bytes swapped, N and Z from the lower, V and C cleared.
+swab_           call    #wrmw
+                mov     r, v
+                shl     r, #8
+                shr     v, #8
+                or      r, v
+                and     r, wmask
+                andn    psw, #CC
+                mov     t, r
+                and     t, #$FF         wz
+        if_z    or      psw, #ZF
+                testb   r, #7           wc
+        if_c    or      psw, #NF
+                jmp     #\dwrite
+
+' SXT dst: the destination all ones if N is set, all zeros if not.
+sxt_            call    #\wspec
+                mov     dspec, spec
+        if_c    jmp     #.op
+                call    #\ea
+                mov     cyc, #DATO
+                call    #\locate
+.op             testb   psw, #3         wc
+        if_c    mov     r, wmask
+        if_c    andn    psw, #ZF | VF
+        if_nc   mov     r, #0
+        if_nc   andn    psw, #VF
+        if_nc   or      psw, #ZF
+                jmp     #\dwrite
+
+' MFPI src: a word of the previous mode's space onto the current stack. Its
+' address is found in the current space, and it is read in the previous one;
+' a register is the current mode's, but for the previous mode's own stack
+' pointer, which is the machine's.
+mfpi            call    #\wspec
+        if_nc   jmp     #.memory
+                cmp     spec, #6        wz
+        if_z    call    #\samemode
+                alts    spec, #r0
+                mov     v, 0-0
+                jmp     #.push
+.memory         call    #\ea
+                call    #\previous
+                mov     cyc, #DATI
+                call    #\rd
+                mov     tab, tsave
+                mov     v, val
+.push           call    #\pushw
+                mov     r, v
+                call    #\setnz
+                mov     r6, va
+                wrword  v, ha
+                jmp     #\retire
+
+' MTPI dst: a word off the current stack into the previous mode's space. The
+' stack pointer is stepped before the destination is decoded.
+mtpi            call    #\words
+                mov     va, r6
+                mov     cyc, #DATI
+                call    #\rd
+                mov     v, val
+                mov     rn, #6
+                call    #\remember
+                add     r6, #2
+                zerox   r6, #15
+                mov     dspec, ir
+                and     dspec, #$3F
+                cmp     dspec, #8       wc
+        if_nc   jmp     #.memory
+                cmp     dspec, #6       wz
+        if_z    call    #\samemode
+                mov     r, v
+                call    #\setnz
+                altd    dspec, #r0
+                mov     0-0, v
+                jmp     #\retire
+.memory         mov     spec, dspec
+                call    #\ea
+                call    #\previous
+                mov     cyc, #DATO
+                call    #\locate
+                mov     tab, tsave
+                mov     r, v
+                call    #\setnz
+                wrword  v, ha
+                jmp     #\retire
+
+' ---- The batch's beginning and end.
+
+' code looks up the page pg the program is in, from which instructions are
+' fetched until it leaves it, and hands the instruction back if the page may
+' not be read.
+code            mov     cpage, #8
+                mov     t, pg
+                shl     t, #1
+                add     t, pg
+                add     t, tab
+                rdlut   chub, t         ' where it begins in hub RAM
+                add     chub, membase
+                add     t, #1
+                rdlut   t1, t           ' and the offsets in it, least and span
+                getword clow, t1, #0
+                getword cspan, t1, #1
+                sub     cspan, clow
+                add     t, #1
+                rdlut   t1, t
+                testb   t1, #0          wc
+        if_nc   jmp     #\handback
+        _ret_   mov     cpage, pg
+
+' load reads the machine's state from hub RAM at the beginning of a batch.
+load            setq    #3
+                rdlong  rr01, raddr
+                getword r0, rr01, #0
+                getword r1, rr01, #1
+                getword r2, rr23, #0
+                getword r3, rr23, #1
+                getword r4, rr45, #0
+                getword r5, rr45, #1
+                getword r6, rr67, #0
+                getword r7, rr67, #1
+                rdword  psw, pswaddr
+                rdword  sr0, sr0addr
+
+                ' SR2 is the program counter of the last instruction fetched,
+                ' unless an abort holds it.
+                test    sr0, ##ERRORS   wz
+                muxz    flags, #1
+
+                ' The memory management off, or on in the current mode, whose
+                ' pages and the previous mode's, which MFPI and MTPI reach
+                ' into, are the kernel's or the user's: those are the 11/40's.
+                ' With it on in another, every access is the machine's.
+                testb   sr0, #0         wc
+        if_nc   mov     xlate, #xoff
+        if_nc   mov     fetchx, #foff
+        if_nc   mov     ptab, #KTAB
+        if_nc   ret
+                mov     xlate, #xon
+                mov     fetchx, #fon
+                mov     cpage, #8
+                mov     t, psw
+                shr     t, #14
+                alts    t, #modetab
+                mov     tab, 0-0
+                mov     t, psw
+                shr     t, #12
+                and     t, #3
+                alts    t, #modetab
+                mov     ptab, 0-0
+                tjnz    tab, #.mapped
+                mov     xlate, #handback
+                mov     fetchx, #handback
+                ret
+.mapped         rdlong  t, mappedaddr
+                cmp     t, gen          wz
+        if_nz   call    #remap
+                ret
+
+' store writes the machine's state back at the end of a batch, with SR2.
+store           mov     rr01, r1
+                shl     rr01, #16
+                or      rr01, r0
+                mov     rr23, r3
+                shl     rr23, #16
+                or      rr23, r2
+                mov     rr45, r5
+                shl     rr45, #16
+                or      rr45, r4
+                mov     rr67, r7
+                shl     rr67, #16
+                or      rr67, r6
+                setq    #3
+                wrlong  rr01, raddr
+                wrword  psw, pswaddr
+                testb   flags, #0       wc
+        if_c    wrword  pc0, sr2addr
+                ret
+
+' remap reads the pages of the kernel and of the user into the LUT, which the
+' machine has changed since they were read last, t being how often.
+remap           mov     gen, t
+                setq2   #MODEPAGES / 4 - 1
+                rdlong  KTAB, pagesaddr
+                mov     t1, pagesaddr
+                add     t1, ##3 * MODEPAGES
+                setq2   #MODEPAGES / 4 - 1
+        _ret_   rdlong  UTAB, t1
+
+' rebind reads where the machine keeps its state from the block, and works out
+' where in hub RAM memory ends for each way of reaching it: below the I/O page
+' with the memory management off, and below the I/O page of the bus with it
+' on, or where memory ends if that is lower.
+rebind          mov     t, blk
+                add     t, #PLACE * 4
+                setq    #PLACES - 1
+                rdlong  raddr, t
+                mov     doneaddr, blk
+                add     doneaddr, #EXECUTED * 4
+                mov     t, memwords
+                shl     t, #1
+                mov     limit0, t
+                fle     limit0, ##IOPAGE
+                add     limit0, membase
+                mov     limit1, t
+                fle     limit1, ##IOBASE
+                add     limit1, membase
+                neg     gen, #1         ' no pages read yet
+                wrlong  #0, blk
+                jmp     #\idle
+lutend
+                fit     $200 + KTAB
