@@ -37,7 +37,7 @@ What differs from Go and shapes this project:
 
 ### Which compiler
 
-The repository needs `ogo` v0.44.0, of 2026-09-28, or a later one: `go install modernc.org/ogo@v0.44.0`. It is formatted as that formatter formats, which is as gofmt does. `ogo` on PATH is installed from `../ogo` by the user and the agent there, and may lag the tree or be ahead of what this file knows. Do not install over it. To try the tree's compiler, build it somewhere of your own, which reads `../ogo` and changes nothing there:
+The repository needs `ogo` v0.47.0 or a later one: the core, `core`, is a Spin2 object, and `pdp11` makes numbers of the addresses of its fields with `unsafe.Pointer`, which v0.47.0 was the first to have; v0.46.0 refuses the import of `unsafe`. The numbers of 2026-10-03 are v0.48.0's, `go install modernc.org/ogo@v0.48.0`, which has binaries for Linux, macOS and Windows among its releases; built with v0.47.0, the core ran as fast and the machine alone 7% slower. It is formatted as that formatter formats, which is as gofmt does. `ogo` on PATH is installed from `../ogo` by the user and the agent there, and may lag the tree or be ahead of what this file knows. Do not install over it. To try the tree's compiler, build it somewhere of your own, which reads `../ogo` and changes nothing there:
 
 ```sh
 (cd ../ogo && go build -o "$SCRATCH/ogo-head" .)
@@ -45,7 +45,7 @@ The repository needs `ogo` v0.44.0, of 2026-09-28, or a later one: `go install m
 
 Before a fault is reported, it is looked for with the tree's compiler: twice on 2026-09-27 what `ogo` on PATH did was already fixed there. And a compiler that is given a program to find a fault with is run under a cap, as `../ogo`'s own sweeps are, `ulimit -v 4000000` and `timeout -s KILL`: the tree's compiler of 2026-09-26 allocated without end on a shape this project wrote, and an uncapped run took the machine's memory.
 
-The tests want more: `ogo` v0.47.1, of 2026-10-01. `vga` calls a Spin2 object and fills the driver's parameters through `unsafe.Pointer`, which v0.47.0 was the first to have, and names them `params`, as `vt100` names a constant, which v0.47.1 was the first to keep apart; and `vt100` sends ESC 7 in one string, which the compilers before v0.47.0 made another character of (`OCTOGO.md`). The program builds with v0.44.0 still, nothing it imports wanting more. v0.47.1 has no binaries of its own: `go install modernc.org/ogo@v0.47.1`.
+The tests want more: `ogo` v0.47.1, of 2026-10-01. `vga` calls a Spin2 object and fills the driver's parameters through `unsafe.Pointer`, which v0.47.0 was the first to have, and names them `params`, as `vt100` names a constant, which v0.47.1 was the first to keep apart; and `vt100` sends ESC 7 in one string, which the compilers before v0.47.0 made another character of (`OCTOGO.md`). v0.47.1 has no binaries of its own: `go install modernc.org/ogo@v0.47.1`.
 
 A build of this repository says nothing. One that warns has found something: the unsigned number compared as a signed one, which `OCTOGO.md` has among what is closed, was a wrong answer that came with a warning.
 
@@ -133,7 +133,7 @@ The work moved to another machine on 2026-09-28. What the repository does not ho
 
 | What | Where it comes from |
 | --- | --- |
-| `ogo` v0.44.0 or later | the user installs it from `../ogo`, or `go install modernc.org/ogo@v0.44.0` |
+| `ogo` v0.47.0 or later | the user installs it from `../ogo`, or `go install modernc.org/ogo@v0.48.0` |
 | Go, for `ogo` and the twin, which is built for 386 | the system; go1.27.1 was what there was |
 | python3, gcc, make and git, for the scripts and what they build; `fuser`, of psmisc; Pillow and numpy, for `scripts/poster.py` | the system |
 | `tools/`, SimH and the assembler | `scripts/tools.sh`, which fetches and builds them |

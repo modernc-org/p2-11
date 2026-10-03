@@ -105,22 +105,16 @@ says on the board what it says in SimH.
 ## Running it
 
 It needs a Propeller 2 board and OctoGo. It was written with a P2 Edge module,
-P2-EC, and needs `ogo` v0.44.0 or a later one:
+P2-EC, and needs `ogo` v0.47.0 or a later one, the core being a Spin2 object;
+its tests want v0.47.1. v0.48.0 is the one it was last measured with:
 
 ```sh
-go install modernc.org/ogo@v0.44.0
+go install modernc.org/ogo@v0.48.0
 ```
 
 Without Go, a binary of it for Linux, macOS or Windows is among
-[its releases](https://github.com/modernc-org/ogo/releases); v0.46.0 is the
-one this was last tested with.
-
-The tests want v0.47.1 or a later one, which has no binaries yet: those of the
-screen call a driver written in Spin2, which no release before it could.
-
-```sh
-go install modernc.org/ogo@v0.47.1
-```
+[its releases](https://github.com/modernc-org/ogo/releases), v0.48.0's among
+them.
 
 ```sh
 ogo run                                  # build, load, and open a terminal
