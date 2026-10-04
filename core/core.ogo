@@ -10,8 +10,10 @@
 // memory management does not admit, unexecuted.
 //
 // The core is PASM, core.spin2, and works on the machine's state where the
-// machine keeps it, which pdp11.Machine.Places says, so that nothing is
-// copied between the two: the machine waits while the core runs.
+// machine keeps it, which pdp11.Machine.Places says, while the machine waits:
+// it reads the registers and the status word into its own when a batch
+// begins and writes them back when it ends, and keeps a copy of the pages in
+// its LUT, which it reads again when they have changed.
 //
 // It runs on the board only: the host's compiler cannot build a program that
 // calls a Spin2 object.

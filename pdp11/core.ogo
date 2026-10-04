@@ -5,7 +5,10 @@
 // A core: what executes the machine's instructions faster than its own code
 // does, somewhere else, such as on a cog of its own in the P2's instructions.
 // It works on the machine's state where the machine keeps it, which Places
-// says, while Run waits for it, so nothing is copied to it or back.
+// says, while Run waits for it. It may hold the registers and the status word
+// in its own while it executes, reading them when it is given instructions and
+// writing them back before it answers, and a copy of the pages, which it reads
+// again when Mapped says they have changed.
 
 import "unsafe"
 

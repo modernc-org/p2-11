@@ -8,7 +8,8 @@ in a measurement.
 **Built the same day**, as architecture A, the package `core`, aimed at about
 an 11/40's speed: `mac/bench.mac` runs five times as fast with it, one and a
 half times an 11/40. Where it differs from what follows: the core works on the
-machine's own fields in hub RAM, so a synchronisation copies nothing; the
+machine's own fields in hub RAM, holding only the registers and the status
+word in its own while a batch runs and a copy of the pages in its LUT; the
 handshake is PASM in the object's methods; PS and the page registers were
 handed back at first, which left 5.8% of V6's instructions to the machine,
 and are the core's since the same day, which leaves 1.9%, their code running

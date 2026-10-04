@@ -145,13 +145,14 @@ scripts/card.py put RK0.DSK RK0.DSK      # a pack onto the card, through the boa
 | [vga](vga) | that screen on a VGA monitor, with [Eric Smith's tile driver](https://github.com/totalspectrum/p2_vga_text) and Unscii's font |
 | [scripts](scripts) | what makes the test vectors, assembles the programs, makes the font, runs the tests under Go, and draws the logo |
 
-The cogs share memory and no lock: every variable two of them share is
-written by one of them only.
+The cogs share memory and no lock: every variable a device's cog shares with
+the machine is written by one of them only, and the machine's cog and the
+core's take turns at the machine's state, the one waiting while the other runs.
 
-Only the two programs, `sd` and `vga` know about the Propeller 2. The other
-packages are Go once they are given a package clause, which is how their tests
-also run where there is no board. `sd`, `fat`, `vt100` and `vga` know nothing
-about the PDP-11.
+Only the three programs, `core`, `sd` and `vga` know about the Propeller 2.
+The other packages are Go once they are given a package clause, which is how
+their tests also run where there is no board. `sd`, `fat`, `vt100` and `vga`
+know nothing about the PDP-11.
 
 What writing it found out about OctoGo is in [OCTOGO.md](OCTOGO.md).
 
