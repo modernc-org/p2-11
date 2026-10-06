@@ -5,6 +5,7 @@
 import (
 	"testing"
 
+	"modernc.org/p2-11/core"
 	"modernc.org/p2-11/mac"
 	"modernc.org/p2-11/pdp11"
 	"modernc.org/p2-11/rk11"
@@ -24,6 +25,7 @@ const (
 	rkba = 0o177410
 	rkda = 0o177412
 
+	readBlock  = 0o005
 	writeBlock = 0o003
 	checkBlock = 0o007
 	diskDone   = 0o200
@@ -70,17 +72,32 @@ func do(function uint16, block uint32) uint16 {
 	}
 }
 
+// started says whether the cog of the disk has been started, and packed
+// whether drive 0 has a pack then, which is TEST.DSK in these tests.
+var started, packed bool
+
+// testDisk starts the cog of the disk, once, and reports whether TEST.DSK is
+// the pack in drive 0. It fails the test unless that is so or there is no
+// card.
+func testDisk(t *testing.T) bool {
+	if !started {
+		started = true
+		names[0] = "TEST.DSK"
+		packed = drives()
+	}
+	if !packed && noCard != &sd.ErrNoCard && noCard != nil {
+		t.Fail()
+	}
+	return packed
+}
+
 func TestDiskProgram(t *testing.T) {
-	names[0] = "TEST.DSK"
 	switch {
 	case !bus():
 		println("no room on the bus")
 		t.Fail()
 		return
-	case !drives():
-		if noCard != &sd.ErrNoCard && noCard != nil {
-			t.Fail()
-		}
+	case !testDisk(t):
 		println("nothing tested")
 		return
 	}
@@ -119,4 +136,70 @@ func TestDiskProgram(t *testing.T) {
 			t.Fail()
 		}
 	}
+}
+
+// An instruction that reads a word and writes it back holds the bus between
+// the two, as DATIP and DATO, and no device moves data to that word in
+// between: what the disk reads into memory either comes before the read, and
+// the instruction changes it, or after the write, and stays. Here the machine
+// increments the first word of a block the disk is reading into memory, over
+// and over, with the core and without, and the word ends up holding the
+// block's number with as many added as came after, unless what the disk wrote
+// there was lost, and the word is what it was with all of them added.
+var increments = [...]uint16{
+	0o005210, // INC (R0)
+	0o000776, // BR .-2
+}
+
+const (
+	incrementsAt = 0o1000
+	before       = 0o100000 // what the word holds before a block is read, more than any number added
+	blockReads   = 100
+)
+
+func TestDiskReadModifyWrite(t *testing.T) {
+	switch {
+	case !bus():
+		println("no room on the bus")
+		t.Fail()
+		return
+	case !testDisk(t):
+		println("nothing tested")
+		return
+	}
+	for pass := 0; pass < 2; pass++ {
+		if pass == 1 {
+			core.Detach(&machine)
+		}
+		machine.Reset()
+		machine.Load(incrementsAt, increments[:])
+		lost := 0
+		for block := uint32(100); block < 100+blockReads; block++ {
+			machine.Deposit(somewhere, before)
+			machine.R[0] = somewhere
+			machine.R[7] = incrementsAt
+			machine.Deposit(rkda, uint16(block/12)<<4|uint16(block%12))
+			machine.Deposit(rkba, somewhere)
+			machine.Deposit(rkwc, 0o177400)
+			machine.Deposit(rkcs, readBlock)
+			machine.Run(4096)
+			for {
+				if v, _ := machine.Examine(rkcs); v&diskDone != 0 {
+					if v&diskFailed != 0 {
+						println("block", block, "of TEST.DSK cannot be read")
+						t.Fail()
+					}
+					break
+				}
+			}
+			if v, _ := machine.Examine(somewhere); v >= before {
+				lost++
+			}
+		}
+		if lost != 0 {
+			printf("pass %d: %d of %d words the disk wrote were lost\n", pass, lost, blockReads)
+			t.Fail()
+		}
+	}
+	accelerate()
 }

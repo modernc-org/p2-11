@@ -155,6 +155,9 @@ scripts/card.py put RK0.DSK RK0.DSK      # a pack onto the card, through the boa
 The cogs share memory and no lock: every variable a device's cog shares with
 the machine is written by one of them only, and the machine's cog and the
 core's take turns at the machine's state, the one waiting while the other runs.
+The disk writes what it reads to memory between two instructions, when the
+machine's cog lends it the bus, so that it cannot come between an
+instruction's read of a word and its writing back, as on a PDP-11.
 
 Only the three programs, `core`, `sd` and `vga` know about the Propeller 2.
 The other packages are Go once they are given a package clause, which is how

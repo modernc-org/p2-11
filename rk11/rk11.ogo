@@ -196,6 +196,14 @@ type Controller struct {
 	finished  uint32
 	served    bool
 
+	// The bus, when the cog of the disk runs beside the machine's, apart:
+	// that cog counts the times it has wanted it to store to memory and the
+	// times it is done with it, and the machine's the times it has lent it.
+	apart    bool
+	wanted   uint32
+	released uint32
+	lent     uint32
+
 	// The block on its way, and what memory has of it when the two are
 	// compared.
 	block [BlockSize]byte
@@ -226,7 +234,7 @@ func (c *Controller) Attach(n int, pack Disk, locked bool) bool {
 // Serve does what the controller orders, for ever. It is what the cog of the
 // disk runs.
 func (c *Controller) Serve() {
-	c.served = true
+	c.served, c.apart = true, true
 	for {
 		if c.ordered != c.finished && !c.order.here {
 			c.work()
@@ -253,6 +261,9 @@ func (c *Controller) Reset() {
 // update brings the registers up to what has happened since they were last
 // looked at.
 func (c *Controller) update() {
+	if c.wanted != c.lent {
+		c.lend()
+	}
 	if c.busy && c.finished == c.ordered {
 		c.transferred()
 	}
@@ -264,6 +275,38 @@ func (c *Controller) update() {
 			c.seeking = 0
 		}
 	}
+}
+
+// lend lends the bus to the cog of the disk, which wants to store to memory,
+// and waits until it is done with it. The machine's cog looks at the
+// controller between two instructions, or between two cycles of one that are
+// no read of a word and its writing back, when a PDP-11 lets a device have
+// the bus.
+func (c *Controller) lend() {
+	c.lent = c.wanted
+	for c.released != c.lent {
+	}
+}
+
+// store stores p to memory from the address a, as Memory.Store does. The cog
+// of the disk does it only when the machine's has lent it the bus: what it
+// stored otherwise could come between an instruction reading a word and
+// writing it back, and be lost. It stores nothing of an order that is
+// abandoned meanwhile.
+func (c *Controller) store(a uint32, p []byte, number uint32) int {
+	if !c.apart || c.order.here {
+		return c.memory.Store(a, p)
+	}
+	c.wanted++
+	for c.lent != c.wanted {
+		if c.abandoned == number {
+			c.released = c.wanted
+			return 0
+		}
+	}
+	n := c.memory.Store(a, p)
+	c.released = c.wanted
+	return n
 }
 
 // ask has who ask for an interrupt, unless there are to be none.
@@ -452,7 +495,7 @@ func (c *Controller) begin() {
 		block:    block,
 		words:    words,
 		memory:   uint32(c.cs&extension)<<12 | uint32(c.ba),
-		here:     !c.served,
+		here:     !c.served || f == read && c.cs&format != 0,
 	}
 	c.ordered++
 	c.busy = true
@@ -526,14 +569,14 @@ func (c *Controller) read(o *order, number uint32) report {
 			return r
 		}
 		if o.control&inhibit != 0 {
-			if c.memory.Store(memory, c.block[2*n-2:2*n]) == 0 {
+			if c.store(memory, c.block[2*n-2:2*n], number) == 0 {
 				r.errors |= noMemory
 				return r
 			}
 			r.words += n
 			continue
 		}
-		stored := uint32(c.memory.Store(memory, c.block[:2*n]))
+		stored := uint32(c.store(memory, c.block[:2*n], number))
 		r.words += stored / 2
 		if stored != 2*n {
 			r.errors |= noMemory
@@ -545,7 +588,8 @@ func (c *Controller) read(o *order, number uint32) report {
 }
 
 // headers is a read of the sectors' headers, a word each, which is the
-// cylinder where the disk address has it.
+// cylinder where the disk address has it. Nothing of it is on the pack, and
+// the machine's cog does it itself, storing to memory as it goes.
 func (c *Controller) headers(o *order) report {
 	var r report
 	block, memory := o.block, o.memory
