@@ -164,7 +164,9 @@ The other packages are Go once they are given a package clause, which is how
 their tests also run where there is no board. `sd`, `fat`, `vt100` and `vga`
 know nothing about the PDP-11.
 
-What writing it found out about OctoGo is in [OCTOGO.md](OCTOGO.md).
+How it is made and why, how it is tested and what it costs, is in
+[DESIGN.md](DESIGN.md). What writing it found out about OctoGo is in
+[OCTOGO.md](OCTOGO.md).
 
 ## A disk
 

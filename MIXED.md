@@ -13,7 +13,7 @@ word in its own while a batch runs and a copy of the pages in its LUT; the
 handshake is PASM in the object's methods; PS and the page registers were
 handed back at first, which left 5.8% of V6's instructions to the machine,
 and are the core's since the same day, which leaves 1.9%, their code running
-from hub RAM; and with a core the devices are asked every 256 instructions. CLAUDE.md, "The
+from hub RAM; and with a core the devices are asked every 256 instructions. DESIGN.md, "The
 core", has it as it is; what follows is the plan as it was, and was not
 built in all of its parts. A number marked **measured** was
 measured on a P2 board; one marked **estimate** is arithmetic from measured
@@ -44,7 +44,7 @@ OctoGo. Whether that is wanted is the user's call (section 9).
 
 ## 1. Where the time goes today (measured, from this repository's own notes)
 
-From CLAUDE.md, "What it costs, measured", 2026-10-02, with `ogo` at ad6edef, at
+From DESIGN.md, "What it costs, measured", 2026-10-02, with `ogo` at ad6edef, at
 160 MHz:
 
 - **`mac/bench.mac`:** 129,766 instructions a second checked, 144,701
