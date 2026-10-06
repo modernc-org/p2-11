@@ -630,6 +630,12 @@ cspan           res     1
 pc0             res     1
 ir              res     1
 ulog            res     1
+
+' The registers an instruction has stepped and what they held, for a hand-back
+' to undo: two at the most, which remember notes for each operand whose mode
+' steps its register, and for MTPI's stack pointer beside its destination's.
+' JSR, MFPI and RTS change the stack pointer and the link register when nothing
+' can fail any more, and note nothing. Room for three leaves one to spare.
 ureg            res     3
 uval            res     3
 op              res     1
