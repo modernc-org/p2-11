@@ -33,6 +33,10 @@ type image struct {
 	unmirrored bool
 	active     byte
 
+	// What the volume's first block says otherwise than the volume is, if
+	// not 0: how many blocks a table has, and the volume.
+	tableBlocks, volumeBlocks uint32
+
 	reads int
 }
 
@@ -60,6 +64,7 @@ var listed = [...]entry{
 	{"EMPTY   DSK", 0x20, 0, 0},
 	{"BLOCK      ", 0x20, 30, 1},
 	{"OUTSIDE DSK", 0x20, 5000, 100},
+	{"HUGE    DSK", 0x20, 3, 0xffffffff}, // the most a file can have
 }
 
 const (
@@ -156,13 +161,20 @@ func (d *image) Read(block uint32, p []byte) error {
 	block -= d.first
 	switch {
 	case block == 0:
+		size, all := uint32(tableLen), uint32(volumeLen)
+		if d.tableBlocks != 0 {
+			size = d.tableBlocks
+		}
+		if d.volumeBlocks != 0 {
+			all = d.volumeBlocks
+		}
 		p[0] = 0xeb
 		put(p, bytesPerBlock, 2, BlockSize)
 		p[blocksPerCluster] = perCluster
 		put(p, reservedBlocks, 2, reserved)
 		p[tables] = 2
-		put(p, volumeSize, 4, volumeLen)
-		put(p, tableSize, 4, tableLen)
+		put(p, volumeSize, 4, all)
+		put(p, tableSize, 4, size)
 		put(p, rootCluster, 4, rootAt)
 		if d.unmirrored {
 			put(p, tableFlags, 2, 0x80|uint32(d.active))
@@ -271,6 +283,7 @@ func TestFind(t *testing.T) {
 		find(t, v, "PIECES.DSK", &ErrFragmented, 0, 0)
 		find(t, v, "SHORT.DSK", &ErrFragmented, 0, 0)
 		find(t, v, "OUTSIDE.DSK", &ErrDamaged, 0, 0)
+		find(t, v, "HUGE.DSK", &ErrDamaged, 0, 0)
 
 		find(t, v, "NONE.DSK", &ErrNotFound, 0, 0)
 		find(t, v, "SUB", &ErrNotFound, 0, 0)
@@ -308,6 +321,29 @@ func TestActiveTable(t *testing.T) {
 	if err := volume.Mount(&disk); err != &ErrDamaged {
 		println("a volume is mounted by a table it has not")
 		t.Fail()
+	}
+}
+
+// Volumes whose first block says what cannot be: tables so large that two of
+// them wrap around 32 bits to nothing, or a block larger than FAT32 can need;
+// and a volume that goes past the last block a disk can have, or ends before
+// its tables do. Numbers that wrapped around would put the clusters on the
+// tables, or on the blocks the disk begins with, and a file found there would
+// be written over them.
+var damaged = [...]image{
+	{tableBlocks: 1 << 31},
+	{tableBlocks: maxTable + 1},
+	{first: 0xffffff00, volumeBlocks: 0x200},
+	{first: 0xfffffff0, volumeBlocks: 15},
+}
+
+func TestDamaged(t *testing.T) {
+	for i := range damaged {
+		disk = damaged[i]
+		if err := volume.Mount(&disk); err != &ErrDamaged {
+			printf("volume %d is mounted\n", i)
+			t.Fail()
+		}
 	}
 }
 

@@ -83,6 +83,10 @@ const (
 	clusterBits = 0x0fffffff
 	lastCluster = 0x0ffffff8
 	perBlock    = BlockSize / 4
+
+	// maxTable is the most blocks a table needs, for as many clusters as 28
+	// bits number.
+	maxTable = (clusterBits + 1) / perBlock
 )
 
 // A Volume is a FAT32 volume.
@@ -139,24 +143,31 @@ func (v *Volume) Mount(d Disk) error {
 		}
 	}
 
+	// The volume is damaged unless what it says of itself comes to numbers
+	// of 32 bits, which they would otherwise wrap around: a table of no more
+	// blocks than FAT32 can need, and a volume that ends before the last
+	// block a disk can have, its tables and the blocks before them being
+	// fewer than all of it.
 	v.perCluster = uint32(v.buf[blocksPerCluster])
-	v.table = first + v.word(reservedBlocks)
+	reserved := v.word(reservedBlocks)
 	size := v.long(tableSize)
-	v.data = v.table + uint32(v.buf[tables])*size
+	count := uint32(v.buf[tables])
+	all := v.long(volumeSize)
+	if v.perCluster == 0 || size == 0 || size > maxTable || all > ^uint32(0)-first || reserved+count*size >= all {
+		return &ErrDamaged
+	}
+	v.table = first + reserved
+	v.data = v.table + count*size
 	// The tables are mirrors of each other unless bit 7 of the flags says
 	// they are not, and then the one the lower four bits name is the one
 	// that says where a file is.
 	if flags := v.word(tableFlags); flags&0x80 != 0 {
-		if flags&0xf >= uint32(v.buf[tables]) {
+		if flags&0xf >= count {
 			return &ErrDamaged
 		}
 		v.table += (flags & 0xf) * size
 	}
 	v.root = v.long(rootCluster)
-	all := v.long(volumeSize)
-	if v.perCluster == 0 || size == 0 || first+all <= v.data {
-		return &ErrDamaged
-	}
 	v.clusters = (first + all - v.data) / v.perCluster
 	if v.clusters > size*perBlock-2 {
 		v.clusters = size*perBlock - 2
@@ -212,7 +223,13 @@ func (v *Volume) Find(name string) (File, error) {
 // bytes, having seen that every cluster of it is followed by the next there
 // is.
 func (v *Volume) file(cluster, size uint32) (File, error) {
-	f := File{Blocks: (size + BlockSize - 1) / BlockSize, Size: size}
+	// The last block, which the file may not fill, is counted apart: for a
+	// file of almost 4 GiB its size and the bytes of a block more would wrap
+	// around 32 bits.
+	f := File{Blocks: size / BlockSize, Size: size}
+	if size%BlockSize != 0 {
+		f.Blocks++
+	}
 	if size == 0 {
 		return f, nil
 	}
