@@ -123,7 +123,10 @@ const (
 // settling is how many times the controller is looked at before a seek that
 // was begun has come to its end. It takes no time here, and the controller
 // is ready for the next function before the drive is, as it is with a drive
-// that has an arm to move.
+// that has an arm to move. One count serves all the drives: a seek on another
+// drive is begun by writing the disk address and then the control and status
+// register, two looks, which end a seek begun before it as long as settling
+// is no more than 2.
 const settling = 2
 
 // A Disk is a pack: blocks of BlockSize bytes, by their numbers.

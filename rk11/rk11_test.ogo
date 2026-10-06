@@ -244,6 +244,21 @@ func TestSeeking(t *testing.T) {
 	expect(t, "the first word read", machineRead(0o20000), 7)
 }
 
+// Two drives do not seek at once, which one count of looks for all of them
+// relies on: the two writes that begin a seek on the second end the seek of
+// the first.
+func TestSeekingTwo(t *testing.T) {
+	fresh(t, false, nil)
+	ask(seek, 0o6200, 0, 0)
+	machineWrite(da, 1<<13|0o6200)
+	machineWrite(cs, seek<<1|start)
+	expect(t, "the drives that seek", disk.seeking, 1<<1)
+	machineRead(cs)
+	expect(t, "the drives that seek, a look later", disk.seeking, 1<<1)
+	machineRead(cs)
+	expect(t, "the drives that seek, two looks later", disk.seeking, 0)
+}
+
 // A pack that cannot be read is a checksum that is wrong, which a program
 // tries again, and one that cannot be written is the drive's error.
 func TestPackFails(t *testing.T) {
