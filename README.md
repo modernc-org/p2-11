@@ -102,6 +102,13 @@ what it says in SimH, and leaves on the card what SimH leaves in its file;
 and a talk with Unix V6 in which a C program is written, compiled and run
 says on the board what it says in SimH.
 
+Where it is not an 11/40: an interrupt a device asks for is taken when the
+machine next asks the devices, every 32 instructions, every 256 with the core,
+and at once after an instruction that touched a device or the status word. An
+11/40 takes it after the instruction during which it was asked for. Neither
+RT-11 nor Unix V6 minds, and when a device asks is the emulator's to say
+anyway, as it is SimH's.
+
 ## Running it
 
 It needs a Propeller 2 board and OctoGo. It was written with a P2 Edge module,
