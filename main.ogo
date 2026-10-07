@@ -155,5 +155,10 @@ func main() {
 	} else {
 		run(mac.DemoAt, mac.DemoStart, mac.Demo[:])
 	}
+
+	// The program ends when main returns, and every other cog with it: what
+	// the console has not sent by then is not sent.
+	for console.Pending() {
+	}
 	printf("PC %06o\r\n", machine.R[7])
 }
