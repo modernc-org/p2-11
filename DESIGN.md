@@ -60,7 +60,7 @@ OctoGo (`ogo`) is a Go-like language for the P2. Its compiler emits C and compil
 - `printf` and `println` are builtins. There is no `fmt`.
 - The standard library is `p2`, `strings`, `bytes`, `math` and `testing`. `p2` wraps about thirty intrinsics: pins, smart pins, timing, the serial line and the hardware locks. It has no SPI, no video and no USB.
 - Locals are cog registers from a pool of 480 longs. Running out fails the build with `fit 480 failed`, which names assembly rather than source. What spends them is a string or a slice passed at many call sites of one function; the `CLAUDE.md` of OctoGo's repository says more under "A TEMPORARY IS A COG REGISTER".
-- A goroutine's stack is 256 longs unless `--gostack` changes it, for every goroutine at once.
+- A goroutine's stack is 256 longs unless `--gostack` changes it, for every goroutine at once, and nothing checks it while the goroutine runs. The cog of the disk needs 432 at every boot, finding its packs on the card, and runs 176 longs into the next slot, which no goroutine claims after it; `ogo` after v0.49.1 sizes every slot from what the listing says the deepest goroutine needs (`OCTOGO.md`).
 
 ## Architecture
 
