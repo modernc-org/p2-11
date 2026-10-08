@@ -113,19 +113,19 @@ anyway, as it is SimH's.
 
 It needs a Propeller 2 board and OctoGo. It was written with a P2 Edge module,
 P2-EC, and needs `ogo` v0.47.0 or a later one, the core being a Spin2 object;
-its tests want v0.47.1. v0.48.0 is the one it was last measured with:
+its tests want v0.47.1. v0.50.0 is the one it was last measured with:
 
 ```sh
-go install modernc.org/ogo@v0.48.0
+go install modernc.org/ogo@v0.50.0
 ```
 
 Without Go, a binary of it for Linux, macOS or Windows is among
-[its releases](https://github.com/modernc-org/ogo/releases), v0.48.0's among
-them.
+[its releases](https://github.com/modernc-org/ogo/releases); on 2026-10-08 the
+latest of them was v0.48.0's, with which it runs as well.
 
 ```sh
 ogo run                                  # build, load, and open a terminal
-ogo build --unchecked --clock 200MHz     # as fast as it goes: 952,842 a second
+ogo build --unchecked --clock 200MHz     # as fast as it goes: 949,855 a second
 ogo test ./...                           # the tests, on the board
 scripts/twin.sh                          # the packages' tests under Go, no board needed
 scripts/talk.py                          # a talk with RT-11 on the pack, on the board and in SimH
