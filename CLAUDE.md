@@ -29,7 +29,7 @@ What differs from Go and shapes this project is in DESIGN.md, "Written in OctoGo
 
 ### Which compiler
 
-The repository needs `ogo` v0.47.0 or a later one: the core, `core`, is a Spin2 object, and `pdp11` makes numbers of the addresses of its fields with `unsafe.Pointer`, which v0.47.0 was the first to have; v0.46.0 refuses the import of `unsafe`. The numbers are v0.50.0's, of 2026-10-08, `go install modernc.org/ogo@v0.50.0`, and within half a percent of those of 2026-10-03, which were v0.48.0's; v0.48.0 is the latest with binaries for Linux, macOS and Windows among its releases on 2026-10-08. Built with v0.47.0, the core ran as fast and the machine alone 7% slower. v0.48.1 builds every program and test binary of the repository byte for byte as v0.48.0 does. With v0.50.0 a program ends when `main` returns, every cog with it, which is why `main` waits for the console to have sent what it has; and a goroutine's stack is sized from the listing, which DESIGN.md tells of. It is formatted as that formatter formats, which is as gofmt does. `ogo` on PATH is installed from `../ogo` by the user and the agent there, and may lag the tree or be ahead of what this file knows. Do not install over it. To try the tree's compiler, build it somewhere of your own, which reads `../ogo` and changes nothing there:
+The repository needs `ogo` v0.47.0 or a later one: the core, `core`, is a Spin2 object, and `pdp11` makes numbers of the addresses of its fields with `unsafe.Pointer`, which v0.47.0 was the first to have; v0.46.0 refuses the import of `unsafe`. The numbers are v0.50.0's, of 2026-10-08, and v0.51.0's of the day after, the same within a millisecond: `go install modernc.org/ogo@v0.51.0`, which has binaries for Linux, macOS and Windows among its releases. They are within half a percent of those of 2026-10-03, which were v0.48.0's. Built with v0.47.0, the core ran as fast and the machine alone 7% slower. v0.48.1 builds every program and test binary of the repository byte for byte as v0.48.0 does. With v0.50.0 a program ends when `main` returns, every cog with it, which is why `main` waits for the console to have sent what it has; and a goroutine's stack is sized from the listing, which DESIGN.md tells of. It is formatted as that formatter formats, which is as gofmt does. `ogo` on PATH is installed from `../ogo` by the user and the agent there, and may lag the tree or be ahead of what this file knows. Do not install over it. To try the tree's compiler, build it somewhere of your own, which reads `../ogo` and changes nothing there:
 
 ```sh
 (cd ../ogo && go build -o "$SCRATCH/ogo-head" .)
@@ -112,7 +112,7 @@ The work moved to another machine on 2026-09-28. What the repository does not ho
 
 | What | Where it comes from |
 | --- | --- |
-| `ogo` v0.47.0 or later | the user installs it from `../ogo`, or `go install modernc.org/ogo@v0.50.0` |
+| `ogo` v0.47.0 or later | the user installs it from `../ogo`, or `go install modernc.org/ogo@v0.51.0` |
 | Go, for `ogo` and the twin, which is built for 386 | the system; go1.27.1 was what there was |
 | python3, gcc, make and git, for the scripts and what they build; `fuser`, of psmisc; Pillow and numpy, for `scripts/poster.py` | the system |
 | `tools/`, SimH and the assembler | `scripts/tools.sh`, which fetches and builds them |
