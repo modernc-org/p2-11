@@ -92,6 +92,17 @@ recording.
 | KT11-D memory management, 248 KB | there |
 | a VT100 on a VGA monitor of its own, for the console | begun: the terminal and the screen are there, and the screen is seen on a monitor on the board; the console is not on it yet |
 
+The screen is [vt100](vt100), a VT100's 80 by 24 characters, which
+[vga](vga) shows at 640 by 480 from a cog of its own. The PDP-11's console is
+not on it yet, but the screen works:
+
+![The board's screen on a monitor of seven inches: a greeting, the sixteen colours, bold, underlined, blinking and reverse text, a + in each corner, and the seconds counting](screen.jpg)
+
+That is a program made for the day, on 2026-10-23, with the A/V breakout of
+Parallax's P2-ES accessory set on the pins from P16 and a monitor of seven
+inches on its VGA socket, photographed after 140 seconds. The blue is the
+camera's: to the eye the background is the panel's black.
+
 The processor is tested against the PDP-11/40 of
 [SimH](https://opensimh.org): 2902 cases of a machine before an instruction and
 after it, 522 of them the memory management's, on the board and on the machine
