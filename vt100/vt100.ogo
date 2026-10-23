@@ -680,10 +680,12 @@ func (t *Terminal) room() bool {
 	return t.head-t.tail <= answerSize-longest
 }
 
-// number says a number, in decimal.
+// number says a number below 100 in decimal, as the position of a line or a
+// column is. It does not recurse, so that the cog that calls Put has a stack
+// whose size the compiler can know.
 func (t *Terminal) number(n int) {
 	if n >= 10 {
-		t.number(n / 10)
+		t.tell(byte('0' + n/10))
 	}
 	t.tell(byte('0' + n%10))
 }
