@@ -10,8 +10,14 @@
 // what it can of its instructions in the P2's own, the core, which makes it
 // five times as fast. One does nothing but read the serial line, because a
 // byte that arrives while a cog is elsewhere is lost. One writes the serial
-// line. One counts the cycles of a power line there is none of, for the line
-// clock. One moves blocks between the SD card and memory, for the disk.
+// line, and puts the same on a screen. One counts the cycles of a power line
+// there is none of, for the line clock. One moves blocks between the SD card
+// and memory, for the disk.
+//
+// A seventh shows that screen on a VGA monitor, a VT100's, the monitor being on
+// the pins from P16, where the A/V breakout of Parallax's accessory set has it
+// when it is on the header of P16 to P23. With nothing on those pins, the cog
+// shows the screen to no one. What is typed comes over the serial line.
 //
 // With a card in the slot that has a file RK0.DSK, the machine begins with
 // what is on that pack. Without one it runs a program of its own.
@@ -25,6 +31,8 @@ import (
 	"modernc.org/p2-11/mac"
 	"modernc.org/p2-11/pdp11"
 	"modernc.org/p2-11/rk11"
+	"modernc.org/p2-11/vga"
+	"modernc.org/p2-11/vt100"
 )
 
 const (
@@ -37,12 +45,18 @@ const (
 	// console hands the machine, however fast they are typed. It is what
 	// SimH leaves between them.
 	apart = 1000
+
+	// screen is the first of the pins of the VGA monitor.
+	screen = 16
 )
 
 var (
 	machine pdp11.Machine
 	console dl11.Line
 	clock   kw11.Clock
+
+	// term is the VT100 whose screen the monitor shows.
+	term vt100.Terminal
 
 	// memory is all that 18 bits of address reach: 248 KB. It is part of
 	// the binary, so the binary is that much larger to load.
@@ -63,11 +77,23 @@ func receive() {
 // transmit puts what the console sends on the serial line, seven bits of it,
 // as SimH's console does: Unix V6 sends a character with its even parity in
 // the eighth bit, which a terminal of today takes for another character, and
-// then a carriage return is not one.
+// then a carriage return is not one. It puts the same on the screen.
 func transmit() {
 	for {
-		p2.WriteByte(console.Next() & 0x7f)
+		b := console.Next() & 0x7f
+		p2.WriteByte(b)
+		term.Put(b)
 		console.Sent()
+	}
+}
+
+// show has the monitor show the screen, on a cog of its own. Without a cog for
+// it, the console is the serial line alone. What the VT100 would answer the
+// host is not sent: the terminal on the serial line answers that.
+func show() {
+	term.Reset()
+	if !vga.Start(screen, (*uint32)(&term.Screen[0]), vt100.Cols, vt100.Rows, &vga.Font) {
+		println("no cog for the screen, so the console is the serial line alone")
 	}
 }
 
@@ -134,6 +160,7 @@ func main() {
 		return
 	}
 	accelerate()
+	show()
 	go receive()
 	go transmit()
 	go line()

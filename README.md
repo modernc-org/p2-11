@@ -90,11 +90,13 @@ recording.
 | RT-11 V4, the single job monitor | runs |
 | Unix V6 | runs, and compiles |
 | KT11-D memory management, 248 KB | there |
-| a VT100 on a VGA monitor of its own, for the console | begun: the terminal and the screen are there, and the screen is seen on a monitor on the board; the console is not on it yet |
+| a VT100 on a VGA monitor of its own, for the console | begun: what the console sends is on the screen as on a VT100, on a monitor on the board; there is no keyboard yet |
 
 The screen is [vt100](vt100), a VT100's 80 by 24 characters, which
-[vga](vga) shows at 640 by 480 from a cog of its own. The PDP-11's console is
-not on it yet, but the screen works:
+[vga](vga) shows at 640 by 480 from a cog of its own, on a monitor on the pins
+from P16. What the PDP-11's console sends is on it as well as on the serial
+line; what is typed comes over the serial line, there being no keyboard yet.
+The screen on its own:
 
 ![The board's screen on a monitor of seven inches: a greeting, the sixteen colours, bold, underlined, blinking and reverse text, a + in each corner, and the seconds counting](screen.jpg)
 
@@ -102,6 +104,12 @@ That is a program made for the day, on 2026-10-23, with the A/V breakout of
 Parallax's P2-ES accessory set on the pins from P16 and a monitor of seven
 inches on its VGA socket, photographed after 140 seconds. The blue is the
 camera's: to the eye the background is the panel's black.
+
+And the PDP-11's console on it the same evening: Unix V6 playing Ken
+Thompson's chess, from `/usr/games`, which prints the board when it is given
+an empty line. The program's capitals are its own pieces, black.
+
+![Unix V6 on the board's screen: the moves of a Ruy Lopez and the chess board as V6's chess prints it](v6-chess.jpg)
 
 The processor is tested against the PDP-11/40 of
 [SimH](https://opensimh.org): 2902 cases of a machine before an instruction and
@@ -148,7 +156,7 @@ scripts/card.py put RK0.DSK RK0.DSK      # a pack onto the card, through the boa
 
 | | |
 | --- | --- |
-| [main.ogo](main.ogo), [disk.ogo](disk.ogo) | the program: six cogs, one stepping the machine, one executing what it can of its instructions, one reading the serial line, one writing it, one counting the cycles of the line clock, one moving blocks between the card and memory |
+| [main.ogo](main.ogo), [disk.ogo](disk.ogo) | the program: seven cogs, one stepping the machine, one executing what it can of its instructions, one reading the serial line, one writing it and the screen, one counting the cycles of the line clock, one moving blocks between the card and memory, and one showing the screen on a VGA monitor |
 | [pdp11](pdp11) | the machine: processor, memory, bus, traps and interrupts |
 | [core](core) | its common instructions in PASM, on a cog of their own |
 | [dl11](dl11) | the console |
