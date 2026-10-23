@@ -11,9 +11,10 @@ import (
 
 // No monitor is needed: what the test looks at is the vertical sync, which is
 // a pin any cog can read. The horizontal sync is a DAC, whose input does not
-// follow it. Nothing is on the pins of the board from 16. A monitor there shows
-// a VT100's screen that says hello, for as long as the test takes, which is ten
-// seconds: a monitor can take some of them before it trusts what it is sent.
+// follow it. The A/V breakout is on the pins of the board from 16 since
+// 2026-10-23, and a monitor on its VGA socket shows a VT100's screen that says
+// hello, for as long as the test takes, which is ten seconds: a monitor can take
+// some of them before it trusts what it is sent.
 const pin = 16
 
 // frames is how many frames the test times, 10.08 s of them.

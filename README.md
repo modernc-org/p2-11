@@ -90,7 +90,7 @@ recording.
 | RT-11 V4, the single job monitor | runs |
 | Unix V6 | runs, and compiles |
 | KT11-D memory management, 248 KB | there |
-| a VT100 on a VGA monitor of its own, for the console | begun: the terminal and the screen are there, and wait for a monitor on the board |
+| a VT100 on a VGA monitor of its own, for the console | begun: the terminal and the screen are there, and the screen is seen on a monitor on the board; the console is not on it yet |
 
 The processor is tested against the PDP-11/40 of
 [SimH](https://opensimh.org): 2902 cases of a machine before an instruction and
